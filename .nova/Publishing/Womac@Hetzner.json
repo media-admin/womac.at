@@ -1,0 +1,12 @@
+{
+  "identifier" : "2A9CD0E1-CC3F-4E42-88D2-4201DF0EF7CA",
+  "ignoredFilePatterns" : [
+    "cms\/wp-content\/uploads\/backwpup",
+    "cms\/wp-config.php"
+  ],
+  "localPath" : ".",
+  "remotePath" : "\/public_html",
+  "remoteURL" : "https:\/\/www.womac.at",
+  "server" : "Womac@Hetzner",
+  "usesPublishing" : true
+}

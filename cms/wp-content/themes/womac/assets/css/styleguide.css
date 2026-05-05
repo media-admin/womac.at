@@ -1,0 +1,31 @@
+:root { 
+  --black: #000000;
+  --cultured-pearl: #f5f5f5;
+ 
+  --font-size-l: 16px;
+  --font-size-m: 12px;
+  --font-size-s: 9px;
+  --font-size-xl: 17.6px;
+  --font-size-xxl: 18px;
+  --font-size-xxxl: 24px;
+  --font-size-xxxxl: 36px;
+ 
+  --font-family-source_code_pro: "Source Code Pro", Helvetica;
+  --font-family-source_sans_pro: "Source Sans Pro", Helvetica;
+  --font-family-source_sans_pro_semibold-italic: "Source Sans Pro SemiBold-Italic", Helvetica;
+}
+.sourcesansprosemibold-italic-normal-cultured-pearl-18px {
+  color: var(--cultured-pearl);
+  font-family: var(--font-family-source_sans_pro_semibold-italic);
+  font-size: var(--font-size-xxl);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.sourcesansprosemibold-italic-normal-cultured-pearl-16px {
+  color: var(--cultured-pearl);
+  font-family: var(--font-family-source_sans_pro_semibold-italic);
+  font-size: var(--font-size-l);
+  font-style: italic;
+  font-weight: 400;
+}

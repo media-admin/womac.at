@@ -1,0 +1,345 @@
+/* screen - desktop-startseite */
+
+.desktop-startseite {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8.12vw;
+  height: 71.11vw;
+  min-width: 100.0vw;
+  overflow: hidden;
+  padding: 9.65vw 35.62vw;
+  position: relative;
+}
+
+.desktop-startseite .content-wrapper {
+  align-items: center;
+  display: flex;
+  gap: 0.28vw;
+  height: 75.21vw;
+  justify-content: center;
+  left: calc(50.00% - 75.35vw);
+  padding: 0.28vw;
+  position: absolute;
+  top: calc(50.00% - 37.64vw);
+  width: 150.69vw;
+}
+
+.desktop-startseite .bg-img-desktop {
+  aspect-ratio: 2.01;
+  flex: 1;
+  flex-grow: 1;
+  object-fit: cover;
+  position: relative;
+}
+
+.desktop-startseite .logo_womac {
+  flex: 0 0 auto;
+  margin-left: -0.03vw;
+  margin-right: -0.03vw;
+  position: relative;
+/*   width: 28.8vw; */
+  width: 128.8vw;
+}
+
+.desktop-startseite .contact-area {
+  -webkit-backdrop-filter: blur(0.14vw) brightness(100%);
+  align-items: center;
+  backdrop-filter: blur(0.14vw) brightness(100%);
+  background-color: #d9d9d9bf;
+  border-radius: 0.69vw;
+  box-shadow: 0.0vw 0.28vw 0.28vw #00000040;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 0.62vw;
+  justify-content: center;
+  position: relative;
+  width: 22.22vw;
+}
+
+.desktop-startseite .title {
+  align-self: stretch;
+  color: var(--black);
+  font-family: var(--font-family-source_sans_pro);
+  font-size: var(--font-size-xxxxl);
+  font-weight: 300;
+  height: 3.06vw;
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.07vw;
+  position: relative;
+  text-align: center;
+}
+
+.desktop-startseite .augasse-22-2620-neunkirchen {
+  align-self: stretch;
+  color: var(--black);
+  font-family: var(--font-family-source_sans_pro);
+  font-size: var(--font-size-xxxl);
+  font-weight: 300;
+  height: 2.71vw;
+  letter-spacing: 0;
+  line-height: 2.1vw;
+  position: relative;
+  text-align: center;
+}
+
+.desktop-startseite .social-media-area {
+  align-items: flex-start;
+  display: flex;
+  gap: 1.81vw;
+  height: 2.5vw;
+  justify-content: center;
+  position: relative;
+  width: 5.14vw;
+}
+
+.desktop-startseite .icon_facebook {
+  background-image: url(../img/vector@2x.png);
+  background-size: 100% 100%;
+  height: 1.46vw;
+  position: relative;
+  width: 0.76vw;
+}
+
+.desktop-startseite .icon_instagram {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28vw;
+  position: relative;
+  width: 1.52vw;
+}
+
+.desktop-startseite .vector {
+  height: 1.52vw;
+  position: relative;
+  width: 1.52vw;
+}
+
+.desktop-startseite .footer-navigation {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2.43vw;
+  justify-content: center;
+  position: relative;
+}
+
+.desktop-startseite .footer-navigation-item {
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.07vw;
+  position: relative;
+  width: fit-content;
+}
+
+.desktop-startseite .copyright-area {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 0.28vw;
+  justify-content: center;
+  padding: 0.28vw;
+  position: relative;
+}
+
+.desktop-startseite .copyright-2025 {
+  color: var(--cultured-pearl);
+  font-family: var(--font-family-source_code_pro);
+  font-size: var(--font-size-m);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.07vw;
+  position: relative;
+  width: fit-content;
+}
+/* screen - index */
+
+.index {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 21.25vw;
+  height: 177.5vw;
+  min-width: 100.0vw;
+  padding: 31.56vw 5.62vw 4.69vw;
+  position: relative;
+}
+
+.index .content-wrapper-1 {
+  align-items: center;
+  display: flex;
+  gap: 1.25vw;
+  height: 177.5vw;
+  justify-content: center;
+  left: calc(50.00% - 50.0vw);
+  padding: 1.25vw;
+  position: absolute;
+  top: calc(50.00% - 88.75vw);
+  width: 100.0vw;
+}
+
+.index .bg-img-desktop-1 {
+  aspect-ratio: 2.01;
+  height: 202.5vw;
+  margin-bottom: -13.75vw;
+  margin-left: -155.0vw;
+  margin-right: -155.0vw;
+  margin-top: -13.75vw;
+  object-fit: cover;
+  position: relative;
+  width: 407.5vw;
+}
+
+.index .logo_womac-1 {
+  height: 17.81vw;
+  position: relative;
+  width: 73.75vw;
+}
+
+.index .contact-area-1 {
+  -webkit-backdrop-filter: blur(0.46vw) brightness(100%);
+  align-items: center;
+  backdrop-filter: blur(0.46vw) brightness(100%);
+  background-color: #d9d9d9bf;
+  border-radius: 2.3vw;
+  box-shadow: 0.0vw 0.92vw 0.92vw #00000040;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2.07vw;
+  position: relative;
+  width: 73.52vw;
+}
+
+.index .title-1 {
+  align-self: stretch;
+  color: var(--black);
+  font-family: var(--font-family-source_sans_pro);
+  font-size: 8.28vw;
+  font-weight: 300;
+  height: 10.11vw;
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.23vw;
+  position: relative;
+  text-align: center;
+}
+
+.index .augasse-22-2620-neunkirchen-1 {
+  align-self: stretch;
+  color: var(--black);
+  font-family: var(--font-family-source_sans_pro);
+  font-size: var(--font-size-xl);
+  font-weight: 300;
+  height: 8.96vw;
+  letter-spacing: 0;
+  line-height: 6.94vw;
+  position: relative;
+  text-align: center;
+}
+
+.index .social-media-area-1 {
+  align-items: flex-start;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8.12vw;
+  justify-content: center;
+  position: relative;
+  width: 23.12vw;
+}
+
+.index .icon_facebook-1 {
+  background-image: url(../img/vector-38@2x.png);
+  background-size: 100% 100%;
+  height: 6.56vw;
+  position: relative;
+  width: 3.43vw;
+}
+
+.index .icon_instagram-1 {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25vw;
+  position: relative;
+  width: 6.84vw;
+}
+
+.index .vector-1 {
+  height: 6.84vw;
+  position: relative;
+  width: 6.84vw;
+}
+
+.index .footer-navigation-1 {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 9.06vw;
+  justify-content: center;
+  position: relative;
+}
+
+.index .impressum {
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.31vw;
+  position: relative;
+  text-align: center;
+  width: 25.31vw;
+}
+
+.index .ag-bs {
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.31vw;
+  position: relative;
+  text-align: center;
+  width: 11.56vw;
+}
+
+.index .datenschutz {
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.31vw;
+  position: relative;
+  text-align: center;
+  width: 28.44vw;
+}
+
+.index .copyright-area-1 {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 1.25vw;
+  justify-content: center;
+  margin-bottom: -1.72vw;
+  padding: 1.25vw;
+  position: relative;
+}
+
+.index .copyright-2025-1 {
+  color: var(--cultured-pearl);
+  font-family: var(--font-family-source_code_pro);
+  font-size: var(--font-size-s);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: normal;
+  margin-top: -0.31vw;
+  position: relative;
+  width: fit-content;
+}
+@media screen and (max-width: 1439px) {
+  .screen.desktop-startseite {
+    display: none;
+   }
+}
+@media screen and (min-width: 1440px) {
+  .screen.index {
+    display: none;
+   }
+}
