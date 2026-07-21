@@ -16,29 +16,29 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * Module:
- *   LCP  – womactheme_preload_lcp_image()          Hero-Bild Preload
- *   LCP  – womactheme_inline_critical_css()         Critical CSS inline
- *   LCP  – womactheme_nonblocking_css()             Haupt-CSS non-blocking
- *   LCP  – womactheme_fetchpriority_first_image()   Erstes Content-Bild
- *   CLS  – womactheme_enforce_image_dimensions()    width/height erzwingen
- *   CLS  – womactheme_add_image_dimensions_to_content()
- *   CLS  – womactheme_fonts_display_swap()          display=swap
- *   CLS  – womactheme_preload_fonts()               Font Preload (Filter)
- *   INP  – womactheme_defer_scripts()               Plugin-Scripts defer
+ *   LCP  – customtheme_preload_lcp_image()          Hero-Bild Preload
+ *   LCP  – customtheme_inline_critical_css()         Critical CSS inline
+ *   LCP  – customtheme_nonblocking_css()             Haupt-CSS non-blocking
+ *   LCP  – customtheme_fetchpriority_first_image()   Erstes Content-Bild
+ *   CLS  – customtheme_enforce_image_dimensions()    width/height erzwingen
+ *   CLS  – customtheme_add_image_dimensions_to_content()
+ *   CLS  – customtheme_fonts_display_swap()          display=swap
+ *   CLS  – customtheme_preload_fonts()               Font Preload (Filter)
+ *   INP  – customtheme_defer_scripts()               Plugin-Scripts defer
  *   INP  – heartbeat_settings                        60s statt 15s
- *   IMG  – womactheme_webp_picture_element()        WebP <picture> (opt-in)
+ *   IMG  – customtheme_webp_picture_element()        WebP <picture> (opt-in)
  *   IMG  – wp_lazy_loading_enabled                   Lazy Loading
  *
  * Konfigurierbare Filter:
- *   womactheme_lcp_image_url          → LCP-Bild manuell steuern
- *   womactheme_lcp_image_srcset       → srcset des LCP-Bildes
- *   womactheme_preload_fonts          → self-hosted Font-URLs
- *   womactheme_enable_picture_webp    → WebP <picture> aktivieren (bool)
- *   womactheme_defer_scripts          → weitere Handles defer-listen
- *   womactheme_exclude_defer_scripts  → Handles von defer ausschließen
- *   womactheme_remove_dns_prefetch    → DNS-Prefetch-URLs entfernen
+ *   customtheme_lcp_image_url          → LCP-Bild manuell steuern
+ *   customtheme_lcp_image_srcset       → srcset des LCP-Bildes
+ *   customtheme_preload_fonts          → self-hosted Font-URLs
+ *   customtheme_enable_picture_webp    → WebP <picture> aktivieren (bool)
+ *   customtheme_defer_scripts          → weitere Handles defer-listen
+ *   customtheme_exclude_defer_scripts  → Handles von defer ausschließen
+ *   customtheme_remove_dns_prefetch    → DNS-Prefetch-URLs entfernen
  *
- * @package womactheme
+ * @package CustomTheme
  * @since   1.12.0
  */
 
@@ -54,14 +54,14 @@ if ( ! defined( 'ABSPATH' ) ) exit;
  * Das Hero-Bild wird via ACF-Feld oder Featured Image ermittelt.
  * Konfigurierbar per Filter:
  *
- *   add_filter( 'womactheme_lcp_image_url', fn() => 'https://...' );
- *   add_filter( 'womactheme_lcp_image_srcset', fn() => '...' );
+ *   add_filter( 'customtheme_lcp_image_url', fn() => 'https://...' );
+ *   add_filter( 'customtheme_lcp_image_srcset', fn() => '...' );
  *
  * Für Startseite und alle Seiten mit gesetztem Bild aktiv.
  */
-add_action( 'wp_head', 'womactheme_preload_lcp_image', 1 );
+add_action( 'wp_head', 'customtheme_preload_lcp_image', 1 );
 
-function womactheme_preload_lcp_image(): void {
+function customtheme_preload_lcp_image(): void {
     // Nur auf Seiten mit potenziellem Hero-Bild
     if ( ! ( is_front_page() || is_singular() || is_archive() ) ) return;
 
@@ -70,7 +70,7 @@ function womactheme_preload_lcp_image(): void {
     $image_sizes  = '';
 
     // 1. Filter-Hook (erlaubt externe Steuerung, z.B. aus Page-Builder-Templates)
-    $image_url = (string) apply_filters( 'womactheme_lcp_image_url', '' );
+    $image_url = (string) apply_filters( 'customtheme_lcp_image_url', '' );
 
     // 2. ACF-Hero-Bild (falls ACF aktiv und Feld gesetzt)
     if ( empty( $image_url ) && function_exists( 'get_field' ) ) {
@@ -99,8 +99,8 @@ function womactheme_preload_lcp_image(): void {
         }
     }
 
-    $image_url    = apply_filters( 'womactheme_lcp_image_url',    $image_url );
-    $image_srcset = apply_filters( 'womactheme_lcp_image_srcset', $image_srcset );
+    $image_url    = apply_filters( 'customtheme_lcp_image_url',    $image_url );
+    $image_srcset = apply_filters( 'customtheme_lcp_image_srcset', $image_srcset );
 
     // MIME-Type ermitteln (für imagesrcset-Hint)
     $ext      = strtolower( pathinfo( $image_url, PATHINFO_EXTENSION ) );
@@ -121,9 +121,9 @@ function womactheme_preload_lcp_image(): void {
  * Fügt fetchpriority="high" + loading="eager" dem ersten Bild im Content hinzu
  * (für Seiten ohne dediziertes Hero-Bild, z.B. Blog-Posts).
  */
-add_filter( 'the_content', 'womactheme_fetchpriority_first_image', 99 );
+add_filter( 'the_content', 'customtheme_fetchpriority_first_image', 99 );
 
-function womactheme_fetchpriority_first_image( string $content ): string {
+function customtheme_fetchpriority_first_image( string $content ): string {
     // Nur einmal pro Request ausführen
     static $done = false;
     if ( $done || ! is_singular() ) return $content;
@@ -163,9 +163,9 @@ function womactheme_fetchpriority_first_image( string $content ): string {
  *
  * Gleichzeitig: Haupt-CSS wird auf non-blocking geladen (media="print" Trick).
  */
-add_action( 'wp_head', 'womactheme_inline_critical_css', 2 );
+add_action( 'wp_head', 'customtheme_inline_critical_css', 2 );
 
-function womactheme_inline_critical_css(): void {
+function customtheme_inline_critical_css(): void {
     $critical_file = get_template_directory() . '/assets/dist/css/critical.css';
 
     if ( ! file_exists( $critical_file ) ) return;
@@ -183,11 +183,11 @@ function womactheme_inline_critical_css(): void {
  * Wechselt das Haupt-CSS auf non-blocking loading wenn Critical CSS vorhanden.
  * Setzt media="print" + onload-Trick für sofortiges non-render-blocking.
  */
-add_filter( 'style_loader_tag', 'womactheme_nonblocking_css', 10, 4 );
+add_filter( 'style_loader_tag', 'customtheme_nonblocking_css', 10, 4 );
 
-function womactheme_nonblocking_css( string $tag, string $handle, string $href, string $media ): string {
+function customtheme_nonblocking_css( string $tag, string $handle, string $href, string $media ): string {
     // Nur Haupt-CSS, nur wenn Critical CSS existiert
-    if ( $handle !== 'womac-theme-style' ) return $tag;
+    if ( $handle !== 'custom-theme-style' ) return $tag;
     if ( ! file_exists( get_template_directory() . '/assets/dist/css/critical.css' ) ) return $tag;
 
     // Non-blocking pattern: media="print" → onload → media="all"
@@ -204,9 +204,9 @@ function womactheme_nonblocking_css( string $tag, string $handle, string $href, 
 /**
  * Fügt font-display:swap zu Google Fonts URLs hinzu (falls genutzt).
  */
-add_filter( 'style_loader_src', 'womactheme_fonts_display_swap', 10, 2 );
+add_filter( 'style_loader_src', 'customtheme_fonts_display_swap', 10, 2 );
 
-function womactheme_fonts_display_swap( string $src, string $handle ): string {
+function customtheme_fonts_display_swap( string $src, string $handle ): string {
     if ( str_contains( $src, 'fonts.googleapis.com' ) && ! str_contains( $src, 'display=swap' ) ) {
         $src = add_query_arg( 'display', 'swap', $src );
     }
@@ -217,7 +217,7 @@ function womactheme_fonts_display_swap( string $src, string $handle ): string {
  * Gibt <link rel="preload"> für selbst-gehostete Schriften aus.
  *
  * Konfiguration via Filter:
- *   add_filter( 'womactheme_preload_fonts', function( $fonts ) {
+ *   add_filter( 'customtheme_preload_fonts', function( $fonts ) {
  *       $fonts[] = [
  *           'href' => get_template_directory_uri() . '/assets/fonts/inter-var.woff2',
  *           'type' => 'font/woff2',
@@ -225,10 +225,10 @@ function womactheme_fonts_display_swap( string $src, string $handle ): string {
  *       return $fonts;
  *   });
  */
-add_action( 'wp_head', 'womactheme_preload_fonts', 1 );
+add_action( 'wp_head', 'customtheme_preload_fonts', 1 );
 
-function womactheme_preload_fonts(): void {
-    $fonts = apply_filters( 'womactheme_preload_fonts', [] );
+function customtheme_preload_fonts(): void {
+    $fonts = apply_filters( 'customtheme_preload_fonts', [] );
 
     foreach ( $fonts as $font ) {
         if ( empty( $font['href'] ) ) continue;
@@ -246,9 +246,9 @@ function womactheme_preload_fonts(): void {
  * Erzwingt width + height Attribute auf allen wp_get_attachment_image()-Bildern.
  * Verhindert Layout Shift durch unbekannte Bild-Dimensionen.
  */
-add_filter( 'wp_get_attachment_image_attributes', 'womactheme_enforce_image_dimensions', 10, 3 );
+add_filter( 'wp_get_attachment_image_attributes', 'customtheme_enforce_image_dimensions', 10, 3 );
 
-function womactheme_enforce_image_dimensions( array $attr, WP_Post $attachment, string|array $size ): array {
+function customtheme_enforce_image_dimensions( array $attr, WP_Post $attachment, string|array $size ): array {
     // Width + Height bereits gesetzt?
     if ( ! empty( $attr['width'] ) && ! empty( $attr['height'] ) ) return $attr;
 
@@ -281,9 +281,9 @@ function womactheme_enforce_image_dimensions( array $attr, WP_Post $attachment, 
 /**
  * Fügt width + height zu <img>-Tags im_content hinzu die diese Attribute fehlen.
  */
-add_filter( 'the_content', 'womactheme_add_image_dimensions_to_content', 10 );
+add_filter( 'the_content', 'customtheme_add_image_dimensions_to_content', 10 );
 
-function womactheme_add_image_dimensions_to_content( string $content ): string {
+function customtheme_add_image_dimensions_to_content( string $content ): string {
     if ( ! str_contains( $content, '<img' ) ) return $content;
 
     return preg_replace_callback(
@@ -332,12 +332,12 @@ function womactheme_add_image_dimensions_to_content( string $content ): string {
  *   - Scripts die bereits type="module" haben (auto-defer)
  *
  * Konfiguration via Filter:
- *   add_filter( 'womactheme_defer_scripts', fn($h) => [...$h, 'my-script'] );
- *   add_filter( 'womactheme_exclude_defer_scripts', fn($h) => [...$h, 'critical-script'] );
+ *   add_filter( 'customtheme_defer_scripts', fn($h) => [...$h, 'my-script'] );
+ *   add_filter( 'customtheme_exclude_defer_scripts', fn($h) => [...$h, 'critical-script'] );
  */
-add_filter( 'script_loader_tag', 'womactheme_defer_scripts', 10, 3 );
+add_filter( 'script_loader_tag', 'customtheme_defer_scripts', 10, 3 );
 
-function womactheme_defer_scripts( string $tag, string $handle, string $src ): string {
+function customtheme_defer_scripts( string $tag, string $handle, string $src ): string {
     // Admin nie anfassen
     if ( is_admin() ) return $tag;
 
@@ -348,7 +348,7 @@ function womactheme_defer_scripts( string $tag, string $handle, string $src ): s
     if ( empty( $src ) ) return $tag;
 
     // Defer-Liste (Plugin-Scripts die sicher deferierbar sind)
-    $defer_handles = apply_filters( 'womactheme_defer_scripts', [
+    $defer_handles = apply_filters( 'customtheme_defer_scripts', [
         // Contact Form 7
         'contact-form-7',
         'wpcf7-swv',
@@ -367,12 +367,12 @@ function womactheme_defer_scripts( string $tag, string $handle, string $src ): s
     ] );
 
     // Ausschluss-Liste
-    $exclude_handles = apply_filters( 'womactheme_exclude_defer_scripts', [
+    $exclude_handles = apply_filters( 'customtheme_exclude_defer_scripts', [
         'jquery',
         'jquery-core',
         'jquery-migrate',
         'wp-util',
-        'womac-theme-script', // Unser main.js (type="module" → bereits defer)
+        'custom-theme-script', // Unser main.js (type="module" → bereits defer)
     ] );
 
     if ( in_array( $handle, $exclude_handles, true ) ) return $tag;
@@ -392,9 +392,9 @@ function womactheme_defer_scripts( string $tag, string $handle, string $src ): s
  */
 
 // Sicherstellen dass srcset aktiv ist
-add_filter( 'wp_calculate_image_srcset_meta', 'womactheme_ensure_srcset_meta', 10, 4 );
+add_filter( 'wp_calculate_image_srcset_meta', 'customtheme_ensure_srcset_meta', 10, 4 );
 
-function womactheme_ensure_srcset_meta( ?array $image_meta, array $size_array, string $image_src, int $attachment_id ): ?array {
+function customtheme_ensure_srcset_meta( ?array $image_meta, array $size_array, string $image_src, int $attachment_id ): ?array {
     // Falls Metadaten fehlen: neu laden
     if ( empty( $image_meta ) ) {
         $image_meta = wp_get_attachment_metadata( $attachment_id );
@@ -406,13 +406,13 @@ function womactheme_ensure_srcset_meta( ?array $image_meta, array $size_array, s
  * Fügt <picture> mit WebP-Source hinzu wenn ein WebP-Pendant existiert.
  * Funktioniert mit EWWW Image Optimizer und nativem WP WebP (6.1+).
  *
- * Nur aktiv wenn filter womactheme_enable_picture_webp = true (Default: false)
+ * Nur aktiv wenn filter customtheme_enable_picture_webp = true (Default: false)
  * da dies Template-seitiges Markup voraussetzt.
  */
-add_filter( 'wp_get_attachment_image', 'womactheme_webp_picture_element', 10, 5 );
+add_filter( 'wp_get_attachment_image', 'customtheme_webp_picture_element', 10, 5 );
 
-function womactheme_webp_picture_element( string $html, int $attachment_id, string|array $size, bool $icon, array $attr ): string {
-    if ( ! apply_filters( 'womactheme_enable_picture_webp', false ) ) return $html;
+function customtheme_webp_picture_element( string $html, int $attachment_id, string|array $size, bool $icon, $attr = array() ): string {
+    if ( ! apply_filters( 'customtheme_enable_picture_webp', false ) ) return $html;
 
     $image_src = wp_get_attachment_image_url( $attachment_id, $size );
     if ( ! $image_src ) return $html;
@@ -443,14 +443,14 @@ function womactheme_webp_picture_element( string $html, int $attachment_id, stri
 
 /**
  * Setzt loading="lazy" auf alle Bilder außer dem LCP-Bild.
- * LCP-Bild bekommt loading="eager" (via womactheme_fetchpriority_first_image).
+ * LCP-Bild bekommt loading="eager" (via customtheme_fetchpriority_first_image).
  */
 add_filter( 'wp_lazy_loading_enabled', '__return_true' );
 
 // Lazy Loading auch für Thumbnails in Loops
-add_filter( 'wp_get_attachment_image_attributes', 'womactheme_lazy_load_thumbnails', 20, 3 );
+add_filter( 'wp_get_attachment_image_attributes', 'customtheme_lazy_load_thumbnails', 20, 3 );
 
-function womactheme_lazy_load_thumbnails( array $attr, WP_Post $attachment, string|array $size ): array {
+function customtheme_lazy_load_thumbnails( array $attr, WP_Post $attachment, string|array $size ): array {
     // Im Admin nicht lazy
     if ( is_admin() ) return $attr;
 
@@ -480,13 +480,13 @@ add_filter( 'max_srcset_image_width', fn() => 2560 );
  * Entfernt unnötige Resource Hints die WP automatisch hinzufügt.
  * Verhindert unnötige DNS-Lookups die INP/FID negativ beeinflussen.
  */
-add_filter( 'wp_resource_hints', 'womactheme_clean_resource_hints', 10, 2 );
+add_filter( 'wp_resource_hints', 'customtheme_clean_resource_hints', 10, 2 );
 
-function womactheme_clean_resource_hints( array $hints, string $relation_type ): array {
+function customtheme_clean_resource_hints( array $hints, string $relation_type ): array {
     // s.w.org (WordPress-Emoji) bereits durch disable_emojis entfernt
     // Hier: weitere unerwünschte prefetches entfernen
     if ( $relation_type === 'dns-prefetch' ) {
-        $remove = apply_filters( 'womactheme_remove_dns_prefetch', [
+        $remove = apply_filters( 'customtheme_remove_dns_prefetch', [
             '//s.w.org',
         ] );
         $hints = array_filter( $hints, fn( $hint ) =>
