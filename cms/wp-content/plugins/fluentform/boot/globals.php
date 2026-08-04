@@ -104,10 +104,11 @@ function fluentFormSanitizer($input, $attribute = null, $fields = [])
         
         foreach ($input as $key => &$value) {
             $key = fluentFormSanitizer($key);
-            $attribute = $attribute ? $attribute . '[' . $key . ']' : $key;
+            // Local var: mutating $attribute here would collapse every sibling
+            // after the first onto a bare key, resolving nested inputs to the wrong element.
+            $childAttribute = $attribute ? $attribute . '[' . $key . ']' : $key;
 
-            $value = fluentFormSanitizer($value, $attribute, $fields);
-            $attribute = null;
+            $value = fluentFormSanitizer($value, $childAttribute, $fields);
             $sanitizedInput[$key] = $value;
         }
         
@@ -256,14 +257,14 @@ function fluentFormHandleScheduledEmailReport()
     \FluentForm\App\Services\Scheduler\Scheduler::processEmailReport();
 }
 
-function fluentform_upgrade_url()
+function fluentform_upgrade_url($utmContent = '')
 {
-    return 'https://fluentforms.com/pricing/?utm_source=plugin&utm_medium=wp_install&utm_campaign=ff_upgrade&theme_style=' . fluentform_get_active_theme_slug();
+    return \FluentForm\App\Helpers\Helper::utmUrl('https://fluentforms.com/pricing/', $utmContent);
 }
 
-function fluentform_integrations_url()
+function fluentform_integrations_url($utmContent = '')
 {
-    return 'https://fluentforms.com/integration/?utm_source=plugin&utm_medium=wp_install&utm_campaign=ff_upgrade&theme_style=' . fluentform_get_active_theme_slug();
+    return \FluentForm\App\Helpers\Helper::utmUrl('https://fluentforms.com/integration/', $utmContent);
 }
 
 function fluentFormApi($module = 'forms')
@@ -319,23 +320,7 @@ function fluentFormPrintUnescapedInternalString($string)
 
 function fluentform_options_sanitize($options)
 {
-    $maps = [
-        'label'      => 'wp_kses_post',
-        'value'      => 'sanitize_text_field',
-        'image'      => 'sanitize_url',
-        'calc_value' => 'sanitize_text_field',
-    ];
-
-    $mapKeys = array_keys($maps);
-
-    foreach ($options as $optionIndex => $option) {
-        $attributes = array_filter(ArrayHelper::only($option, $mapKeys));
-        foreach ($attributes as $key => $value) {
-            $options[$optionIndex][$key] = call_user_func($maps[$key], $value);
-        }
-    }
-
-    return $options;
+    return \FluentForm\App\Helpers\Helper::sanitizeAdvancedOptions($options);
 }
 
 function fluentform_iframe_srcdoc_sanitize($value)
@@ -456,6 +441,16 @@ function fluentform_kses_js($content)
     return preg_replace('/<\/?script[^>]*>/is', '', $content);
 }
 
+function fluentform_sanitize_json_object($value)
+{
+    return \FluentForm\App\Services\FormBuilder\DateConfigNormalizer::sanitize($value);
+}
+
+function fluentform_date_config_to_js($json)
+{
+    return \FluentForm\App\Services\FormBuilder\DateConfigNormalizer::toJs($json);
+}
+
 /**
  * Sanitize inputs recursively.
  *
@@ -531,4 +526,52 @@ function fluentformGetPages()
     }
 
     return $formattedPages;
+}
+
+function fluentform_maybe_disable_contaminated_pro()
+{
+    $unsafeProFile = WP_PLUGIN_DIR . '/fluentformpro/libs/class-license-sync.php';
+
+    if (! is_file($unsafeProFile)) {
+        return;
+    }
+
+    require_once ABSPATH . 'wp-admin/includes/plugin.php';
+
+    deactivate_plugins(
+        'fluentformpro/fluentformpro.php',
+        true
+    );
+
+    $message = sprintf(
+        __('<strong>Fluent Forms Pro has been deactivated for security reasons.</strong> Delete the existing plugin and install a fresh copy from your %1$sWPManageNinja dashboard%2$s. Your Fluent Forms data will remain intact. We recommend %3$sopening a support ticket%4$s so we can help clean up your site. Read the %5$sincident report%6$s for details.', 'fluentform'),
+        '<a href="' . esc_url(add_query_arg('ff_deactivation_error', '1', 'https://wpmanageninja.com/account/downloads')) . '" target="_blank" rel="noopener noreferrer">',
+        '</a>',
+        '<a href="' . esc_url(add_query_arg('ff_deactivation_error', '1', 'https://wpmanageninja.com/account/support-tickets/submit-ticket/')) . '" target="_blank" rel="noopener noreferrer">',
+        '</a>',
+        '<a href="' . esc_url(add_query_arg('ff_deactivation_error', '1', 'https://wpmanageninja.com/security-incident-on-31-july-2026/')) . '" target="_blank" rel="noopener noreferrer">',
+        '</a>'
+    );
+
+    add_action('admin_init', function () use ($message) {
+        $renderNotice = function () use ($message) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Admin notice with HTML links
+            printf('<div class="fluentform-admin-notice notice notice-error"><div style="padding: 15px 10px;">%1$s</div></div>', $message);
+        };
+        add_action('fluentform/global_menu', $renderNotice);
+        add_action('fluentform/after_form_menu', $renderNotice);
+    });
+
+    add_action('admin_notices', function () use ($message) {
+        if (! current_user_can('activate_plugins')) {
+            return;
+        }
+        ?>
+        <div class="notice notice-error">
+            <p>
+                <?php echo $message; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Admin notice with HTML links ?>
+            </p>
+        </div>
+        <?php
+    });
 }

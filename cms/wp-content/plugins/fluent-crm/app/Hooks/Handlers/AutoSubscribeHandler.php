@@ -20,6 +20,17 @@ use FluentCrm\Framework\Support\Arr;
 class AutoSubscribeHandler
 {
 
+    public function register()
+    {
+        add_action('user_register', array($this, 'userRegistrationHandler'), 99, 1);
+        add_action('comment_post', array($this, 'handleCommentPost'), 99, 3);
+        add_action('profile_update', array($this, 'syncUserUpdate'), 10, 3);
+        add_action('delete_user', array($this, 'maybeDeleteContact'), 10, 3);
+        add_action('woocommerce_customer_save_address', array($this, 'syncWooAddressUpdate'), 10, 2);
+
+        add_action('wp_login', array($this, 'maybeAddCountryToProfile'), 99, 2);
+    }
+
     public function userRegistrationHandler($userId)
     {
         if (is_multisite()) {
@@ -75,9 +86,9 @@ class AutoSubscribeHandler
             $contact->sendDoubleOptinEmail();
         }
 
-        add_action("updated_user_meta", function ($meta_id, $userId, $meta_key, $_meta_value) use ($contact) {
+        add_action('updated_user_meta', function ($meta_id, $userId, $meta_key, $_meta_value) use ($contact) {
             if ($userId == $contact->user_id && ($meta_key == 'first_name' || $meta_key == 'last_name') && $_meta_value) {
-                if($contact->{$meta_key} != $_meta_value) {
+                if ($contact->{$meta_key} != $_meta_value) {
                     fluentCrmDb()->table('fc_subscribers')
                         ->where('id', $contact->id)
                         ->update([
@@ -99,10 +110,10 @@ class AutoSubscribeHandler
          *
          * This filter allows modification of the settings used for the comment form subscribe feature in FluentCRM.
          *
-         * @since 2.7.0
-         * 
          * @param array $settings The current settings for the comment form subscribe feature.
          * @return array The modified settings for the comment form subscribe feature.
+         * @since 2.7.0
+         *
          */
         $settings = apply_filters('fluent_crm/comment_form_subscribe_settings', $settings);
 
@@ -186,6 +197,16 @@ class AutoSubscribeHandler
             return false;
         }
 
+        if (!$contact->country) {
+            // CF-IPCountry, trusted only when the request transited Cloudflare
+            $countryCode = Helper::getCfIpCountry();
+            if ($countryCode) {
+                $contact->country = $countryCode;
+                $contact->save();
+            }
+        }
+
+
         if ($contact->status == 'pending') {
             $contact->sendDoubleOptinEmail();
         }
@@ -220,15 +241,32 @@ class AutoSubscribeHandler
             $newSubscriber = Subscriber::where('email', $user->user_email)->first();
 
             if ($newSubscriber) {
-                fluentCrmDb()->table('fc_subscribers')
-                    ->where('id', $oldSubscriber->id)
-                    ->update([
-                        'user_id' => ''
-                    ]);
+                // A contact already owns the new address: move the WP-user link to it.
+                // $oldSubscriber may not exist at all (the old address never had a
+                // contact) — dereferencing it unguarded 500s the whole profile update.
+                if ($oldSubscriber && $oldSubscriber->id != $newSubscriber->id) {
+                    fluentCrmDb()->table('fc_subscribers')
+                        ->where('id', $oldSubscriber->id)
+                        ->update([
+                            'user_id' => null
+                        ]);
+                }
+
+                if ($newSubscriber->user_id != $user->ID) {
+                    fluentCrmDb()->table('fc_subscribers')
+                        ->where('id', $newSubscriber->id)
+                        ->update([
+                            'user_id'    => $user->ID,
+                            'updated_at' => current_time('mysql')
+                        ]);
+                }
+
                 $oldSubscriber = false;
             }
 
             if ($oldSubscriber) {
+                $oldEmail = $oldSubscriber->email;
+
                 $updateData = [
                     'email'      => $user->user_email,
                     'hash'       => md5($user->user_email),
@@ -244,9 +282,16 @@ class AutoSubscribeHandler
                     $updateData['last_name'] = $user->last_name;
                 }
 
-                return fluentCrmDb()->table('fc_subscribers')
+                $updated = fluentCrmDb()->table('fc_subscribers')
                     ->where('id', $oldSubscriber->id)
                     ->update($updateData);
+
+                // The raw query-builder update bypasses model events, so fire the
+                // email-changed hook explicitly — Cleanup@handleContactEmailChanged
+                // re-snapshots queued fc_campaign_emails rows to the new address.
+                do_action('fluent_crm/contact_email_changed', Subscriber::find($oldSubscriber->id), $oldEmail);
+
+                return $updated;
             }
         }
 
@@ -268,7 +313,6 @@ class AutoSubscribeHandler
 
     public function maybeDeleteContact($userId, $reassignId, $user)
     {
-
         if (is_multisite() && is_network_admin()) {
             return false;
         }
@@ -329,6 +373,33 @@ class AutoSubscribeHandler
         } else {
             FluentCrmApi('contacts')->createOrUpdate($updateData);
         }
+    }
+
+    public function maybeAddCountryToProfile($userLogin, $wpUser)
+    {
+        // CF-IPCountry, trusted only when the request transited Cloudflare
+        $countryCode = Helper::getCfIpCountry();
+
+        if (!$countryCode) {
+            return;
+        }
+
+        $contact = Subscriber::where('email', $wpUser->user_email)->first();
+        if (!$contact || $contact->country) {
+            return;
+        }
+
+        $updateData = [
+            'country' => $countryCode
+        ];
+
+        if (empty($contact->user_id) || (int) $contact->user_id === (int) $wpUser->ID) {
+            $updateData['user_id'] = $wpUser->ID;
+        }
+
+        fluentCrmDb()->table('fc_subscribers')
+            ->where('id', $contact->id)
+            ->update($updateData);
     }
 
 }

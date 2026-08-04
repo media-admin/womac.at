@@ -3,10 +3,10 @@
  * Plugin Name: Simple Custom Post Order
  * Plugin URI: https://wordpress.org/plugins-wp/simple-custom-post-order/
  * Description: Order Items (Posts, Pages, and Custom Post Types) using a Drag and Drop Sortable JavaScript.
- * Version: 2.6.0
+ * Version: 2.8.6
  * Author: Colorlib
  * Author URI: https://colorlib.com/
- * Tested up to: 6.9
+ * Tested up to: 7.0
  * Requires: 6.2 or higher
  * License: GPLv3 or later
  * License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -36,7 +36,7 @@
 
 define( 'SCPORDER_URL', plugins_url( '', __FILE__ ) );
 define( 'SCPORDER_DIR', plugin_dir_path( __FILE__ ) );
-define( 'SCPORDER_VERSION', '2.6.0' );
+define( 'SCPORDER_VERSION', '2.8.6' );
 
 $scporder = new SCPO_Engine();
 
@@ -58,6 +58,7 @@ class SCPO_Engine {
 
 		add_action( 'wp_ajax_update-menu-order', array( $this, 'update_menu_order' ) );
 		add_action( 'wp_ajax_update-menu-order-tags', array( $this, 'update_menu_order_tags' ) );
+		add_action( 'wp_ajax_scpo_refresh_nonce', array( $this, 'refresh_nonce' ) );
 
 		add_action( 'pre_get_posts', array( $this, 'scporder_pre_get_posts' ) );
 
@@ -67,8 +68,10 @@ class SCPO_Engine {
 		add_filter( 'get_next_post_sort', array( $this, 'scporder_next_post_sort' ) );
 
 		add_filter( 'get_terms_orderby', array( $this, 'scporder_get_terms_orderby' ), 10, 3 );
-		add_filter( 'wp_get_object_terms', array( $this, 'scporder_get_object_terms' ), 10, 3 );
-		add_filter( 'get_terms', array( $this, 'scporder_get_object_terms' ), 10, 3 );
+		// `wp_get_object_terms` passes $args as the 4th arg, `get_terms` as the 3rd,
+		// so each hook gets its own thin wrapper that hands $args to the sorter.
+		add_filter( 'wp_get_object_terms', array( $this, 'scporder_get_object_terms' ), 10, 4 );
+		add_filter( 'get_terms', array( $this, 'scporder_get_terms' ), 10, 3 );
 
 		add_action( 'admin_notices', array( $this, 'scporder_notice_not_checked' ) );
 		add_action( 'wp_ajax_scporder_dismiss_notices', array( $this, 'dismiss_notices' ) );
@@ -78,6 +81,11 @@ class SCPO_Engine {
 		add_filter( 'scpo_post_types_args', array( $this, 'scpo_filter_post_types' ), 10, 2 );
 
 		add_action( 'wp_ajax_scpo_reset_order', array( $this, 'scpo_ajax_reset_order' ) );
+
+		// 2.8.0: new-item placement (#45) + optional numeric Order column (#76/#89).
+		add_action( 'save_post', array( $this, 'scporder_place_new_post' ), 10, 2 );
+		add_action( 'admin_init', array( $this, 'setup_order_column' ) );
+		add_action( 'wp_ajax_scpo_set_position', array( $this, 'scpo_ajax_set_position' ) );
 
 		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( $this, 'add_settings_link' ) );
 	}
@@ -268,21 +276,125 @@ class SCPO_Engine {
 	 * @return void
 	 */
 	public function load_script_css(): void {
-		if ( $this->_check_load_script_css() ) {
+		if ( ! $this->_check_load_script_css() ) {
+			return;
+		}
+
+		// Don't load the sorter for users who aren't allowed to reorder — avoids a
+		// drag that would just fail on save (#95).
+		if ( ! $this->scporder_user_can_reorder() ) {
+			return;
+		}
+
+		/**
+		 * Which drag-and-drop engine to load. The user's choice in
+		 * Settings → SCPOrder ("Drag & Drop Engine") provides the default; the
+		 * `scpo_use_sortablejs` filter overrides it, so developers can force one
+		 * engine per-site / per-network regardless of the stored setting.
+		 *
+		 * SortableJS (default): native touch, smoother animation, no jQuery UI,
+		 * visible save feedback, keyboard + screen-reader support. The classic
+		 * jQuery UI path remains as an opt-out fallback.
+		 *
+		 * @param bool $use_sortablejs Default derived from the saved engine option.
+		 */
+		$options        = get_option( 'scporder_options', [] );
+		$engine_default = ! ( isset( $options['engine'] ) && 'classic' === $options['engine'] );
+		$use_sortablejs = (bool) apply_filters( 'scpo_use_sortablejs', $engine_default );
+
+		// Serve minified assets; fall back to readable source under SCRIPT_DEBUG.
+		$suffix = ( defined( 'SCRIPT_DEBUG' ) && SCRIPT_DEBUG ) ? '' : '.min';
+
+		if ( $use_sortablejs ) {
+			wp_enqueue_script( 'scpo-sortablejs', SCPORDER_URL . '/assets/vendor/Sortable.min.js', [], '1.15.7', true );
+			wp_enqueue_script( 'scporderjs', SCPORDER_URL . "/assets/scporder-sortablejs{$suffix}.js", [ 'scpo-sortablejs' ], SCPORDER_VERSION, true );
+			wp_enqueue_style( 'scpo-admin', SCPORDER_URL . "/assets/scporder{$suffix}.css", [], SCPORDER_VERSION );
+		} else {
 			wp_enqueue_script( 'jquery' );
 			wp_enqueue_script( 'jquery-ui-sortable' );
-			wp_enqueue_script( 'scporderjs', SCPORDER_URL . '/assets/scporder.min.js', [ 'jquery' ], SCPORDER_VERSION, true );
-			wp_localize_script( 'scporderjs', 'scporder_vars', [
-				'ajax_url' => admin_url( 'admin-ajax.php' ),
-				'nonce'    => wp_create_nonce( 'scporder_nonce_action' ),
-			] );
+			wp_enqueue_script( 'scporderjs', SCPORDER_URL . "/assets/scporder{$suffix}.js", [ 'jquery' ], SCPORDER_VERSION, true );
 			add_action( 'admin_print_styles', [ $this, 'print_scpo_style' ] );
 		}
+
+		// Localized for both paths (the jQuery version simply ignores i18n).
+		wp_localize_script( 'scporderjs', 'scporder_vars', [
+			'ajax_url' => $this->get_ajax_url(),
+			'nonce'    => wp_create_nonce( 'scporder_nonce_action' ),
+			'showHandle' => ( ! isset( $options['show_handle'] ) || '0' !== $options['show_handle'] ) ? '1' : '',
+			'i18n'     => [
+				'saving'       => __( 'Saving order…', 'simple-custom-post-order' ),
+				'saved'        => __( 'Order saved', 'simple-custom-post-order' ),
+				'error'        => __( 'Couldn’t save — please try again', 'simple-custom-post-order' ),
+				/* translators: %1$s: item title. */
+				'reorderLabel' => __( 'Reorder: %1$s', 'simple-custom-post-order' ),
+				/* translators: 1: item title, 2: current row number, 3: total rows. */
+				'grabbed'      => __( 'Grabbed %1$s. Row %2$d of %3$d. Use the arrow keys to move, Space to drop, Escape to cancel.', 'simple-custom-post-order' ),
+				/* translators: 1: item title, 2: current row number, 3: total rows. */
+				'moved'        => __( '%1$s. Row %2$d of %3$d.', 'simple-custom-post-order' ),
+				/* translators: 1: item title, 2: final row number, 3: total rows. */
+				'dropped'      => __( '%1$s dropped. Row %2$d of %3$d.', 'simple-custom-post-order' ),
+				/* translators: 1: item title, 2: restored row number, 3: total rows. */
+				'cancelled'    => __( 'Reorder cancelled. %1$s returned to row %2$d of %3$d.', 'simple-custom-post-order' ),
+			],
+		] );
 	}
 
+	/**
+	 * Root-relative admin-ajax URL for the reorder request.
+	 *
+	 * An absolute admin_url() is built from the `siteurl` option, which is not
+	 * guaranteed to match the origin the admin is actually being viewed from
+	 * (non-standard ports, reverse proxies / load balancers, http↔https
+	 * mismatches, IP-vs-domain access, staging mirrors). When it doesn't match,
+	 * the browser treats the save as cross-origin: the auth cookie is withheld
+	 * and the response is blocked, so the reorder silently never persists.
+	 *
+	 * A root-relative path ("/wp-admin/admin-ajax.php") is always resolved by
+	 * the browser against the current page's origin, so the request is
+	 * guaranteed same-origin on every install layout (including subdirectory
+	 * and multisite, whose admin path is preserved here). Falls back to the
+	 * absolute URL only if the path can't be parsed.
+	 *
+	 * @return string
+	 */
+	private function get_ajax_url(): string {
+		$url   = admin_url( 'admin-ajax.php' );
+		$path  = wp_parse_url( $url, PHP_URL_PATH );
+		$query = wp_parse_url( $url, PHP_URL_QUERY );
+
+		if ( ! is_string( $path ) || '' === $path ) {
+			return $url;
+		}
+
+		return $query ? $path . '?' . $query : $path;
+	}
+
+	/**
+	 * Re-normalize menu_order / term_order into a gapless 1..N sequence for
+	 * enabled types, preserving the saved relative order.
+	 *
+	 * Only runs on the admin list screens where that order is actually
+	 * read/displayed — the same screens the sorter loads on (`_check_load_script_css()`).
+	 * It used to run unconditionally on every `admin_init`, so on large sites it
+	 * added a COUNT-per-type plus (when the order wasn't already gapless) a full
+	 * table renumber to *every* admin page — plugins.php, Dashboard, Tools,
+	 * Settings — producing thousands of queries and multi-second TTFB on screens
+	 * that never show the order (reported on wordpress.org). Nothing needs the
+	 * numbering to be gapless to be correct: drag saves preserve the existing set
+	 * of values, the numeric Order column and new-item placement compute from the
+	 * live rows, and every read (`pre_get_posts`, adjacent-post nav, term sorting)
+	 * uses `ORDER BY … / … <>` which sorts correctly with gaps. So the tidy-up is
+	 * only needed right before the ordered list is rendered.
+	 *
+	 * @return void
+	 */
 	public function refresh(): void {
 
 		if ( scporder_doing_ajax() ) {
+			return;
+		}
+
+		if ( ! $this->_check_load_script_css() ) {
 			return;
 		}
 
@@ -301,29 +413,29 @@ class SCPO_Engine {
 					",
 					$object
 				);
-				
+
 				$result = $wpdb->get_results( $query );
 
-				if ( 0 === (int) $result[0]->cnt || $result[0]->cnt === $result[0]->max ) {
+				if ( $this->is_already_sequential( $result[0] ?? null ) ) {
 					continue;
 				}
 
-				// Optimization with prepared statement for security
-				$object = sanitize_key( $object );
-				$wpdb->query( 'SET @row_number = 0;' );
-				$wpdb->query(
+				// Re-number menu_order into a gapless 1..N sequence, preserving the
+				// existing relative order. Done by reading the ordered IDs and writing
+				// them back rather than via a single UPDATE using a MySQL user variable
+				// (@row_number): that "rank inside a derived table" trick has undefined
+				// evaluation order on MariaDB / MySQL 8 and could scramble the saved
+				// order (PR #147 / issue #119).
+				$object      = sanitize_key( $object );
+				$ordered_ids = $wpdb->get_col(
 					$wpdb->prepare(
-						"UPDATE $wpdb->posts as pt JOIN (
-							SELECT ID, (@row_number:=@row_number + 1) AS `rank`
-							FROM $wpdb->posts
-							WHERE post_type = %s AND post_status IN ( 'publish', 'pending', 'draft', 'private', 'future' )
-							ORDER BY menu_order ASC
-						) as pt2
-						ON pt.id = pt2.id
-						SET pt.menu_order = pt2.`rank`;",
+						"SELECT ID FROM $wpdb->posts
+						WHERE post_type = %s AND post_status IN ( 'publish', 'pending', 'draft', 'private', 'future' )
+						ORDER BY menu_order ASC",
 						$object
 					)
 				);
+				$this->renumber_rows( $wpdb->posts, 'ID', 'menu_order', $ordered_ids );
 
 			}
 		}
@@ -340,26 +452,181 @@ class SCPO_Engine {
 					$taxonomy
 				);
 				$result = $wpdb->get_results( $query );
-				if ( 0 === (int) $result[0]->cnt || $result[0]->cnt === $result[0]->max ) {
+				if ( $this->is_already_sequential( $result[0] ?? null ) ) {
 					continue;
 				}
 
-				$query = $wpdb->prepare(
-					"
-					SELECT terms.term_id
-					FROM $wpdb->terms AS terms
-					INNER JOIN $wpdb->term_taxonomy AS term_taxonomy ON ( terms.term_id = term_taxonomy.term_id )
-					WHERE term_taxonomy.taxonomy = %s
-					ORDER BY term_order ASC
-					",
-					$taxonomy
+				$ordered_ids = $wpdb->get_col(
+					$wpdb->prepare(
+						"
+						SELECT terms.term_id
+						FROM $wpdb->terms AS terms
+						INNER JOIN $wpdb->term_taxonomy AS term_taxonomy ON ( terms.term_id = term_taxonomy.term_id )
+						WHERE term_taxonomy.taxonomy = %s
+						ORDER BY term_order ASC
+						",
+						$taxonomy
+					)
 				);
-				
-				$results = $wpdb->get_results( $query );
-				foreach ( $results as $key => $result ) {
-					$wpdb->update( $wpdb->terms, array( 'term_order' => $key + 1 ), array( 'term_id' => $result->term_id ) );
-				}
+				$this->renumber_rows( $wpdb->terms, 'term_id', 'term_order', $ordered_ids, $taxonomy );
 			}
+		}
+	}
+
+	/**
+	 * Whether an order column is already a gapless 1..N sequence, judged from the
+	 * COUNT/MAX/MIN probe its callers run before deciding to renumber.
+	 *
+	 * Both `MAX === COUNT` and `MIN === 1` have to hold. The previous check
+	 * tested MAX alone, so a set like {-1, 2, 3, 4, 5} (COUNT 5, MAX 5) read as
+	 * clean and skipped renumbering. That became reachable once top placement
+	 * started writing a value below the current minimum instead of shifting every
+	 * other row, and would have left a negative number showing in the Order
+	 * column. Ordering itself was never affected — reads sort on the raw value.
+	 *
+	 * @param object|null $probe Row exposing cnt / max / min.
+	 * @return bool True when there is nothing to renumber.
+	 */
+	private function is_already_sequential( $probe ): bool {
+		if ( ! is_object( $probe ) ) {
+			return true;
+		}
+
+		$count = (int) $probe->cnt;
+
+		return 0 === $count || ( $count === (int) $probe->max && 1 === (int) $probe->min );
+	}
+
+	/**
+	 * Write a gapless 1..N sequence into an order column for the given rows, in
+	 * the fewest queries possible.
+	 *
+	 * Replaces the previous one-UPDATE-per-row loop, which issued N write queries
+	 * per dirty type and — combined with refresh() running on every admin page —
+	 * produced the thousands-of-queries / multi-second TTFB reported on large
+	 * sites. Rows are renumbered with a single `CASE` statement, chunked so the
+	 * generated SQL stays well under `max_allowed_packet` on any host. Every ID
+	 * and position is bound through `$wpdb->prepare()`; only the internal table /
+	 * column identifiers (all `$wpdb->*` constants, never user input) are
+	 * interpolated.
+	 *
+	 * @param string $table        Table name ( $wpdb->posts or $wpdb->terms ).
+	 * @param string $id_column    Primary-key column ( 'ID' or 'term_id' ).
+	 * @param string $order_column Order column to rewrite ( 'menu_order' or 'term_order' ).
+	 * @param array  $ordered_ids  Row IDs already in the desired order.
+	 * @param string $taxonomy     Taxonomy the IDs belong to, when renumbering terms.
+	 *                             Required for correct cache invalidation (see
+	 *                             invalidate_order_cache()); ignored for posts.
+	 * @return void
+	 */
+	private function renumber_rows( string $table, string $id_column, string $order_column, array $ordered_ids, string $taxonomy = '' ): void {
+		global $wpdb;
+
+		$ordered_ids = array_values( array_map( 'intval', (array) $ordered_ids ) );
+		if ( empty( $ordered_ids ) ) {
+			return;
+		}
+
+		$position = 1;
+		foreach ( array_chunk( $ordered_ids, 1000 ) as $chunk ) {
+			$cases  = '';
+			$args   = [];
+			$in     = implode( ', ', array_fill( 0, count( $chunk ), '%d' ) );
+			foreach ( $chunk as $id ) {
+				$cases .= ' WHEN %d THEN %d';
+				$args[] = $id;
+				$args[] = $position;
+				++$position;
+			}
+			// Identifiers are internal ( $wpdb->posts/terms, fixed column names );
+			// all values are bound via prepare(). The WHERE limits the update to the
+			// listed IDs, so every row matches a WHEN — ELSE just guards against ever
+			// writing NULL.
+			$sql = "UPDATE $table SET $order_column = CASE $id_column{$cases} ELSE $order_column END WHERE $id_column IN ($in)";
+			$wpdb->query( $wpdb->prepare( $sql, array_merge( $args, $chunk ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+		}
+
+		$this->invalidate_order_cache( $table, $ordered_ids, $taxonomy );
+	}
+
+	/**
+	 * Drop the object-cache entries for rows whose order column was written with
+	 * a raw query.
+	 *
+	 * Raw `$wpdb` writes never pass through clean_post_cache()/clean_term_cache(),
+	 * so with a persistent object cache (Redis, Memcached) the affected rows keep
+	 * serving their pre-write `menu_order`/`term_order`. Symptoms: stale or
+	 * duplicated values in the numeric Order column, and — because taxcmp()
+	 * re-sorts terms in PHP on the *cached* `$term->term_order` — genuinely wrong
+	 * term order on the front end too. Reported in PR #154.
+	 *
+	 * Strategy depends on how many rows changed. Per-row invalidation is precise
+	 * but O(N); a group flush is O(1) but discards every cached post/term on the
+	 * site. Small writes (the overwhelmingly common case) therefore invalidate
+	 * row by row, and only a bulk renumber past the threshold falls back to the
+	 * group flush. Backends without flush_group support (some Memcached drop-ins,
+	 * older Redis Object Cache builds) always take the per-row path, so the fix
+	 * holds everywhere rather than silently no-op'ing.
+	 *
+	 * @param string $table    Table that was written ( $wpdb->posts or $wpdb->terms ).
+	 * @param array  $ids      IDs whose order column changed.
+	 * @param string $taxonomy Taxonomy the IDs belong to, when invalidating terms.
+	 *                         clean_term_cache() treats a bare ID list as
+	 *                         term_taxonomy_ids when no taxonomy is passed, which
+	 *                         busts the wrong rows wherever term_id and
+	 *                         term_taxonomy_id have diverged.
+	 * @return void
+	 */
+	private function invalidate_order_cache( string $table, array $ids, string $taxonomy = '' ): void {
+		global $wpdb;
+
+		$ids = array_values( array_filter( array_map( 'intval', $ids ) ) );
+		if ( empty( $ids ) ) {
+			return;
+		}
+
+		$is_posts = ( $wpdb->posts === $table );
+		if ( ! $is_posts && $wpdb->terms !== $table ) {
+			return;
+		}
+
+		/**
+		 * Row count above which a whole-group cache flush is cheaper than
+		 * invalidating each row individually.
+		 *
+		 * @param int    $threshold Number of rows. Default 500.
+		 * @param string $table     Table being invalidated.
+		 */
+		$threshold = (int) apply_filters( 'scpo_cache_flush_group_threshold', 500, $table );
+
+		if ( count( $ids ) > $threshold && function_exists( 'wp_cache_supports' ) && wp_cache_supports( 'flush_group' ) ) {
+			wp_cache_flush_group( $is_posts ? 'posts' : 'terms' );
+			return;
+		}
+
+		if ( $is_posts ) {
+			foreach ( $ids as $id ) {
+				clean_post_cache( $id );
+			}
+			return;
+		}
+
+		if ( '' !== $taxonomy ) {
+			clean_term_cache( $ids, $taxonomy );
+			return;
+		}
+
+		// No taxonomy supplied — resolve it per term rather than letting
+		// clean_term_cache() reinterpret the IDs as term_taxonomy_ids.
+		$by_taxonomy = [];
+		foreach ( $ids as $id ) {
+			$term = get_term( $id );
+			if ( $term instanceof WP_Term ) {
+				$by_taxonomy[ $term->taxonomy ][] = $id;
+			}
+		}
+		foreach ( $by_taxonomy as $term_taxonomy => $term_ids ) {
+			clean_term_cache( $term_ids, $term_taxonomy );
 		}
 	}
 
@@ -373,7 +640,7 @@ class SCPO_Engine {
 
 		check_ajax_referer( 'scporder_nonce_action', 'nonce' );
 
-		if ( ! current_user_can( 'edit_posts' ) ) {
+		if ( ! $this->scporder_user_can_reorder() ) {
 			wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
 		}
 
@@ -391,6 +658,19 @@ class SCPO_Engine {
 				foreach ( $values as $id ) {
 					$id_arr[] = absint( $id );
 				}
+			}
+		}
+
+		// Object-level authorization (defense against forged IDs / IDOR).
+		// scporder_user_can_reorder() only gates *access* to this endpoint; it
+		// does not prove the caller may edit the specific posts they submitted.
+		// Require every submitted ID to be an enabled sortable post type that the
+		// current user can actually edit, so a user holding the broad reorder
+		// capability cannot reshuffle menu_order for posts/pages they cannot edit.
+		$objects = $this->get_scporder_options_objects();
+		foreach ( $id_arr as $id ) {
+			if ( ! $this->scporder_user_can_edit_post( $id, $objects ) ) {
+				wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
 			}
 		}
 
@@ -430,9 +710,7 @@ class SCPO_Engine {
 		}
 
 		// Targeted cache invalidation - only for posts we actually changed
-		foreach ( $updated_ids as $post_id ) {
-			clean_post_cache( $post_id );
-		}
+		$this->invalidate_order_cache( $wpdb->posts, $updated_ids );
 
 		do_action( 'scp_update_menu_order' );
 
@@ -449,7 +727,7 @@ class SCPO_Engine {
 
 		check_ajax_referer( 'scporder_nonce_action', 'nonce' );
 
-		if ( ! current_user_can( 'edit_posts' ) ) {
+		if ( ! $this->scporder_user_can_reorder() ) {
 			wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
 		}
 
@@ -467,6 +745,17 @@ class SCPO_Engine {
 				foreach ( $values as $id ) {
 					$id_arr[] = absint( $id );
 				}
+			}
+		}
+
+		// Object-level authorization (defense against forged IDs / IDOR).
+		// Require every submitted term to belong to an enabled sortable taxonomy
+		// the current user is allowed to manage, so the broad reorder capability
+		// alone cannot reshuffle term_order for taxonomies outside their reach.
+		$tags = $this->get_scporder_options_tags();
+		foreach ( $id_arr as $id ) {
+			if ( ! $this->scporder_user_can_edit_term( $id, $tags ) ) {
+				wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
 			}
 		}
 
@@ -505,14 +794,41 @@ class SCPO_Engine {
 			}
 		}
 
-		// Targeted cache invalidation - only for terms we actually changed
-		foreach ( $updated_ids as $term_id ) {
-			clean_term_cache( $term_id );
-		}
+		// Targeted cache invalidation - only for terms we actually changed. The
+		// helper resolves each term's taxonomy first: clean_term_cache() reads a
+		// bare ID list as term_taxonomy_ids, which busts the wrong entries on any
+		// site where term_id and term_taxonomy_id have drifted apart.
+		$this->invalidate_order_cache( $wpdb->terms, $updated_ids );
 
 		do_action( 'scp_update_menu_order_tags' );
 
 		wp_send_json_success( [ 'message' => __( 'Order updated.', 'simple-custom-post-order' ) ] );
+	}
+
+	/**
+	 * Issue a fresh reorder nonce.
+	 *
+	 * A nonce embedded at page load expires (12–24h by default, often far less
+	 * when a security plugin shortens nonce_life). When that happens a reorder
+	 * save is rejected with "-1" and the client calls this endpoint to obtain a
+	 * fresh nonce and transparently retry — so a long-open edit screen still
+	 * saves without the user reloading.
+	 *
+	 * This handler intentionally does NOT verify a nonce (the stale nonce is the
+	 * very reason it's called). It is safe because it is an authenticated action
+	 * (wp_ajax_, not nopriv) gated on the same `edit_posts` capability as the
+	 * reorder endpoints, and admin-ajax sends no CORS headers, so the issued
+	 * nonce cannot be read by a cross-origin attacker. This mirrors how core's
+	 * Heartbeat API refreshes nonces.
+	 *
+	 * @return void
+	 */
+	public function refresh_nonce(): void {
+		if ( ! $this->scporder_user_can_reorder() ) {
+			wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
+		}
+
+		wp_send_json_success( [ 'nonce' => wp_create_nonce( 'scporder_nonce_action' ) ] );
 	}
 
 
@@ -532,6 +848,11 @@ class SCPO_Engine {
 					'objects'            => [],
 					'tags'               => [],
 					'show_advanced_view' => '',
+					'engine'             => 'sortable',
+					'show_handle'        => '1',
+					'new_post_position'  => 'top',
+					'allowed_roles'      => [],
+					'order_column'       => '',
 				],
 			]
 		);
@@ -568,6 +889,30 @@ class SCPO_Engine {
 			'scporder_taxonomies_section'
 		);
 
+		// Drag & Drop Engine Section
+		add_settings_section(
+			'scporder_engine_section',
+			__( 'Drag & Drop Engine', 'simple-custom-post-order' ),
+			[ $this, 'render_engine_section' ],
+			'scporder-settings'
+		);
+
+		add_settings_field(
+			'scporder_engine',
+			__( 'Sorting engine', 'simple-custom-post-order' ),
+			[ $this, 'render_engine_field' ],
+			'scporder-settings',
+			'scporder_engine_section'
+		);
+
+		add_settings_field(
+			'scporder_show_handle',
+			__( 'Drag handle', 'simple-custom-post-order' ),
+			[ $this, 'render_handle_field' ],
+			'scporder-settings',
+			'scporder_engine_section'
+		);
+
 		// Advanced Section
 		add_settings_section(
 			'scporder_advanced_section',
@@ -580,6 +925,30 @@ class SCPO_Engine {
 			'scporder_advanced_view',
 			__( 'Advanced View', 'simple-custom-post-order' ),
 			[ $this, 'render_advanced_view_field' ],
+			'scporder-settings',
+			'scporder_advanced_section'
+		);
+
+		add_settings_field(
+			'scporder_new_post_position',
+			__( 'New items', 'simple-custom-post-order' ),
+			[ $this, 'render_new_post_position_field' ],
+			'scporder-settings',
+			'scporder_advanced_section'
+		);
+
+		add_settings_field(
+			'scporder_order_column',
+			__( 'Order column', 'simple-custom-post-order' ),
+			[ $this, 'render_order_column_field' ],
+			'scporder-settings',
+			'scporder_advanced_section'
+		);
+
+		add_settings_field(
+			'scporder_allowed_roles',
+			__( 'Who can reorder', 'simple-custom-post-order' ),
+			[ $this, 'render_allowed_roles_field' ],
 			'scporder-settings',
 			'scporder_advanced_section'
 		);
@@ -598,6 +967,11 @@ class SCPO_Engine {
 			'objects'            => [],
 			'tags'               => [],
 			'show_advanced_view' => '',
+			'engine'             => 'sortable',
+			'show_handle'        => '1',
+			'new_post_position'  => 'top',
+			'allowed_roles'      => [],
+			'order_column'       => '',
 		];
 
 		// Sanitize post types (objects)
@@ -615,6 +989,26 @@ class SCPO_Engine {
 			$sanitized['show_advanced_view'] = '1';
 		}
 
+		// Sanitize drag-and-drop engine choice (anything but 'classic' is the default).
+		$sanitized['engine'] = ( isset( $input['engine'] ) && 'classic' === $input['engine'] ) ? 'classic' : 'sortable';
+
+		// Show-drag-handle toggle. Unchecked checkboxes are absent from $input,
+		// so missing means "hide" ('0'); checked submits '1'.
+		$sanitized['show_handle'] = ! empty( $input['show_handle'] ) ? '1' : '0';
+
+		// Where newly created items are placed in the order.
+		$sanitized['new_post_position'] = ( isset( $input['new_post_position'] ) && 'bottom' === $input['new_post_position'] ) ? 'bottom' : 'top';
+
+		// Optional numeric "Order" column (off by default).
+		$sanitized['order_column'] = ! empty( $input['order_column'] ) ? '1' : '0';
+
+		// Roles allowed to reorder. Empty array = fall back to the capability check.
+		$sanitized['allowed_roles'] = [];
+		if ( isset( $input['allowed_roles'] ) && is_array( $input['allowed_roles'] ) && function_exists( 'wp_roles' ) ) {
+			$valid_roles                = array_keys( wp_roles()->get_names() );
+			$sanitized['allowed_roles'] = array_values( array_intersect( $valid_roles, array_map( 'sanitize_key', $input['allowed_roles'] ) ) );
+		}
+
 		// Initialize menu_order for newly enabled post types
 		if ( ! empty( $sanitized['objects'] ) ) {
 			foreach ( $sanitized['objects'] as $object ) {
@@ -628,12 +1022,12 @@ class SCPO_Engine {
 					)
 				);
 
-				if ( 0 === (int) $result[0]->cnt || $result[0]->cnt === $result[0]->max ) {
+				if ( $this->is_already_sequential( $result[0] ?? null ) ) {
 					continue;
 				}
 
 				if ( 'page' === $object ) {
-					$results = $wpdb->get_results(
+					$ordered_ids = $wpdb->get_col(
 						$wpdb->prepare(
 							"SELECT ID FROM $wpdb->posts
 							WHERE post_type = %s AND post_status IN ('publish', 'pending', 'draft', 'private', 'future')
@@ -642,7 +1036,7 @@ class SCPO_Engine {
 						)
 					);
 				} else {
-					$results = $wpdb->get_results(
+					$ordered_ids = $wpdb->get_col(
 						$wpdb->prepare(
 							"SELECT ID FROM $wpdb->posts
 							WHERE post_type = %s AND post_status IN ('publish', 'pending', 'draft', 'private', 'future')
@@ -652,9 +1046,11 @@ class SCPO_Engine {
 					);
 				}
 
-				foreach ( $results as $key => $result ) {
-					$wpdb->update( $wpdb->posts, [ 'menu_order' => $key + 1 ], [ 'ID' => $result->ID ] );
-				}
+				// Seeding used to run one UPDATE per row with no cache invalidation
+				// at all. renumber_rows() batches the write and busts the object
+				// cache, so a newly enabled type is not left serving stale
+				// menu_order values from Redis/Memcached.
+				$this->renumber_rows( $wpdb->posts, 'ID', 'menu_order', $ordered_ids );
 			}
 		}
 
@@ -672,11 +1068,11 @@ class SCPO_Engine {
 					)
 				);
 
-				if ( 0 === (int) $result[0]->cnt || $result[0]->cnt === $result[0]->max ) {
+				if ( $this->is_already_sequential( $result[0] ?? null ) ) {
 					continue;
 				}
 
-				$results = $wpdb->get_results(
+				$ordered_ids = $wpdb->get_col(
 					$wpdb->prepare(
 						"SELECT terms.term_id
 						FROM $wpdb->terms AS terms
@@ -687,9 +1083,7 @@ class SCPO_Engine {
 					)
 				);
 
-				foreach ( $results as $key => $result ) {
-					$wpdb->update( $wpdb->terms, [ 'term_order' => $key + 1 ], [ 'term_id' => $result->term_id ] );
-				}
+				$this->renumber_rows( $wpdb->terms, 'term_id', 'term_order', $ordered_ids, $taxonomy );
 			}
 		}
 
@@ -783,6 +1177,84 @@ class SCPO_Engine {
 	}
 
 	/**
+	 * Render drag-and-drop engine section description.
+	 *
+	 * @return void
+	 */
+	public function render_engine_section(): void {
+		echo '<p>' . esc_html__( 'Choose how drag-and-drop reordering behaves. Saving works identically either way — only the interface differs.', 'simple-custom-post-order' ) . '</p>';
+	}
+
+	/**
+	 * Render the drag-and-drop engine choice (Modern vs Classic).
+	 *
+	 * The stored choice is the default; a `scpo_use_sortablejs` filter added by
+	 * a theme/plugin overrides it at runtime, which we surface to the admin.
+	 *
+	 * @return void
+	 */
+	public function render_engine_field(): void {
+		$options = get_option( 'scporder_options', [] );
+		$engine  = ( isset( $options['engine'] ) && 'classic' === $options['engine'] ) ? 'classic' : 'sortable';
+		$forced  = has_filter( 'scpo_use_sortablejs' );
+
+		echo '<fieldset>';
+		echo '<legend class="screen-reader-text"><span>' . esc_html__( 'Sorting engine', 'simple-custom-post-order' ) . '</span></legend>';
+
+		printf(
+			'<label><input type="radio" name="scporder_options[engine]" value="sortable" %s /> %s</label><br />',
+			checked( 'sortable', $engine, false ),
+			esc_html__( 'Modern — smooth animation, touch & keyboard support, save feedback (recommended)', 'simple-custom-post-order' )
+		);
+		printf(
+			'<label><input type="radio" name="scporder_options[engine]" value="classic" %s /> %s</label>',
+			checked( 'classic', $engine, false ),
+			esc_html__( 'Classic — legacy jQuery UI (use only if the modern engine causes a problem)', 'simple-custom-post-order' )
+		);
+
+		if ( $forced ) {
+			echo '<p class="description">' . esc_html__( 'A theme or plugin is currently overriding this choice via the scpo_use_sortablejs filter, so the option above may not reflect what loads.', 'simple-custom-post-order' ) . '</p>';
+		} else {
+			echo '<p class="description">' . esc_html__( 'Developers can override this per-site with the scpo_use_sortablejs filter.', 'simple-custom-post-order' ) . '</p>';
+		}
+
+		echo '</fieldset>';
+	}
+
+	/**
+	 * Render the "show drag handle" toggle, with a live preview of the grip icon.
+	 *
+	 * This only controls the *visible* (mouse-hover) grip. Rows stay draggable
+	 * from anywhere, and keyboard users can always reveal the handle by tabbing
+	 * to a row — so turning this off never affects accessibility. Applies to the
+	 * Modern (SortableJS) engine.
+	 *
+	 * @return void
+	 */
+	public function render_handle_field(): void {
+		$options = get_option( 'scporder_options', [] );
+		$show    = ! isset( $options['show_handle'] ) || '0' !== $options['show_handle'];
+
+		// Static, trusted markup (no user input) — the same grip the script injects.
+		$grip = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" style="vertical-align:middle;fill:#787c82">'
+			. '<circle cx="5" cy="3" r="1.5"/><circle cx="11" cy="3" r="1.5"/>'
+			. '<circle cx="5" cy="8" r="1.5"/><circle cx="11" cy="8" r="1.5"/>'
+			. '<circle cx="5" cy="13" r="1.5"/><circle cx="11" cy="13" r="1.5"/></svg>';
+
+		echo '<fieldset><label>';
+		printf(
+			'<input type="checkbox" name="scporder_options[show_handle]" value="1" %s /> ',
+			checked( $show, true, false )
+		);
+		echo $grip . ' '; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- static, trusted SVG icon.
+		echo esc_html__( 'Show this drag handle when hovering a row', 'simple-custom-post-order' );
+		echo '</label>';
+		echo '<p class="description">'
+			. esc_html__( 'Rows stay draggable from anywhere — this just adds the grip icon as a hover cue. Keyboard users can always reveal the handle by tabbing to a row, so turning this off does not affect accessibility. Applies to the Modern engine.', 'simple-custom-post-order' )
+			. '</p></fieldset>';
+	}
+
+	/**
 	 * Render advanced section description.
 	 *
 	 * @return void
@@ -808,6 +1280,405 @@ class SCPO_Engine {
 		echo '<p class="description">' . esc_html__( 'Enable this to see post types that are normally hidden from the admin menu. For advanced users only.', 'simple-custom-post-order' ) . '</p>';
 	}
 
+	/**
+	 * Render the "new items placement" choice (#45).
+	 *
+	 * @return void
+	 */
+	public function render_new_post_position_field(): void {
+		$pos = $this->get_new_post_position();
+		echo '<fieldset>';
+		echo '<legend class="screen-reader-text"><span>' . esc_html__( 'New items', 'simple-custom-post-order' ) . '</span></legend>';
+		printf(
+			'<label><input type="radio" name="scporder_options[new_post_position]" value="bottom" %s /> %s</label><br />',
+			checked( 'bottom', $pos, false ),
+			esc_html__( 'Add to the bottom of the order', 'simple-custom-post-order' )
+		);
+		printf(
+			'<label><input type="radio" name="scporder_options[new_post_position]" value="top" %s /> %s</label>',
+			checked( 'top', $pos, false ),
+			esc_html__( 'Add to the top of the order (default)', 'simple-custom-post-order' )
+		);
+		echo '<p class="description">' . esc_html__( 'Where a newly created item lands in the manual order of an enabled post type.', 'simple-custom-post-order' ) . '</p>';
+		echo '</fieldset>';
+	}
+
+	/**
+	 * Render the optional "Order" column toggle (#76 / #89).
+	 *
+	 * @return void
+	 */
+	public function render_order_column_field(): void {
+		$on = $this->is_order_column_enabled();
+		printf(
+			'<label><input type="checkbox" name="scporder_options[order_column]" value="1" %s /> %s</label>',
+			checked( $on, true, false ),
+			esc_html__( 'Show an editable “Order” number column on enabled post-type lists', 'simple-custom-post-order' )
+		);
+		echo '<p class="description">' . esc_html__( 'Adds a column where you can type an exact position — handy for jumping an item across paginated lists. Hide it any time via Screen Options. Off by default.', 'simple-custom-post-order' ) . '</p>';
+	}
+
+	/**
+	 * Render the "who can reorder" role checkboxes (#95).
+	 *
+	 * @return void
+	 */
+	public function render_allowed_roles_field(): void {
+		$selected = $this->get_allowed_roles();
+		$roles    = function_exists( 'get_editable_roles' ) ? get_editable_roles() : [];
+		echo '<fieldset>';
+		echo '<legend class="screen-reader-text"><span>' . esc_html__( 'Who can reorder', 'simple-custom-post-order' ) . '</span></legend>';
+		foreach ( $roles as $key => $role ) {
+			printf(
+				'<label><input type="checkbox" name="scporder_options[allowed_roles][]" value="%s" %s /> %s</label><br />',
+				esc_attr( $key ),
+				checked( in_array( $key, $selected, true ), true, false ),
+				esc_html( translate_user_role( $role['name'] ) )
+			);
+		}
+		echo '<p class="description">' . esc_html__( 'Restrict drag-and-drop reordering to these roles. Leave all unchecked to allow anyone who can edit posts (default). Developers can override with the scpo_capability filter.', 'simple-custom-post-order' ) . '</p>';
+		echo '</fieldset>';
+	}
+
+	/* ---- 2.8.0 option helpers ---------------------------------------- */
+
+	public function get_new_post_position(): string {
+		$o = get_option( 'scporder_options', [] );
+		return ( isset( $o['new_post_position'] ) && 'bottom' === $o['new_post_position'] ) ? 'bottom' : 'top';
+	}
+
+	public function is_order_column_enabled(): bool {
+		$o = get_option( 'scporder_options', [] );
+		return isset( $o['order_column'] ) && '1' === $o['order_column'];
+	}
+
+	public function get_allowed_roles(): array {
+		$o = get_option( 'scporder_options', [] );
+		return ( isset( $o['allowed_roles'] ) && is_array( $o['allowed_roles'] ) ) ? $o['allowed_roles'] : [];
+	}
+
+	public function get_reorder_capability(): string {
+		return (string) apply_filters( 'scpo_capability', 'edit_posts' );
+	}
+
+	/**
+	 * Whether the current user may reorder: must hold the (filterable) capability
+	 * and, if specific roles are configured, hold one of them (#95).
+	 *
+	 * @return bool
+	 */
+	public function scporder_user_can_reorder(): bool {
+		if ( ! current_user_can( $this->get_reorder_capability() ) ) {
+			return false;
+		}
+		$roles = $this->get_allowed_roles();
+		if ( empty( $roles ) ) {
+			return true;
+		}
+		$user = wp_get_current_user();
+		return (bool) array_intersect( $roles, (array) $user->roles );
+	}
+
+	/**
+	 * Object-level authorization for the post reorder AJAX handlers.
+	 *
+	 * scporder_user_can_reorder() gates *access* to the endpoints; this is the
+	 * per-object counterpart that stops a user holding the broad reorder
+	 * capability from forging arbitrary IDs (an IDOR). The post must exist,
+	 * belong to an enabled sortable post type, and be editable by the current
+	 * user under that type's own capabilities — so e.g. someone who can edit
+	 * posts but not pages cannot reorder pages.
+	 *
+	 * @param int        $post_id Post ID.
+	 * @param array|null $objects Enabled post types; fetched when null.
+	 * @return bool
+	 */
+	private function scporder_user_can_edit_post( int $post_id, ?array $objects = null ): bool {
+		if ( $post_id <= 0 ) {
+			return false;
+		}
+		$post = get_post( $post_id );
+		if ( ! $post instanceof WP_Post ) {
+			return false;
+		}
+		if ( null === $objects ) {
+			$objects = $this->get_scporder_options_objects();
+		}
+		if ( ! in_array( $post->post_type, $objects, true ) ) {
+			return false;
+		}
+		return current_user_can( 'edit_post', $post_id );
+	}
+
+	/**
+	 * Object-level authorization for the term reorder AJAX handler.
+	 *
+	 * The term counterpart of scporder_user_can_edit_post(): the term must
+	 * exist, belong to an enabled sortable taxonomy, and the user must hold that
+	 * taxonomy's manage_terms capability — the same capability WordPress requires
+	 * to reach the term-list screen where reordering happens.
+	 *
+	 * @param int        $term_id Term ID.
+	 * @param array|null $tags    Enabled taxonomies; fetched when null.
+	 * @return bool
+	 */
+	private function scporder_user_can_edit_term( int $term_id, ?array $tags = null ): bool {
+		if ( $term_id <= 0 ) {
+			return false;
+		}
+		$term = get_term( $term_id );
+		if ( ! $term instanceof WP_Term ) {
+			return false;
+		}
+		if ( null === $tags ) {
+			$tags = $this->get_scporder_options_tags();
+		}
+		if ( ! in_array( $term->taxonomy, $tags, true ) ) {
+			return false;
+		}
+		$taxonomy = get_taxonomy( $term->taxonomy );
+		if ( ! $taxonomy ) {
+			return false;
+		}
+		return current_user_can( $taxonomy->cap->manage_terms );
+	}
+
+	/* ---- #45: placement of newly created items ----------------------- */
+
+	/**
+	 * Place a newly created item at the top or bottom of its post type's order.
+	 * Runs only once — while the item still has the default menu_order of 0.
+	 *
+	 * @param int     $post_id
+	 * @param WP_Post $post
+	 * @return void
+	 */
+	public function scporder_place_new_post( $post_id, $post ): void {
+		if ( wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) {
+			return;
+		}
+		if ( in_array( $post->post_status, [ 'auto-draft', 'trash', 'inherit' ], true ) ) {
+			return;
+		}
+		if ( ! in_array( $post->post_type, $this->get_scporder_options_objects(), true ) ) {
+			return;
+		}
+		if ( 0 !== (int) $post->menu_order ) {
+			return; // already placed / ordered
+		}
+
+		global $wpdb;
+
+		// Both branches move exactly one row: the new post is placed just outside
+		// the current range rather than shifting every sibling to make room.
+		//
+		// 'top' used to run `menu_order = menu_order + 1` across the whole post
+		// type, which cost an O(N) write on every publish and — being a raw query —
+		// left all N shifted rows stale in a persistent object cache (PR #154).
+		// Writing MIN - 1 gets the same placement from a single-row update, so the
+		// clean_post_cache() below is complete on its own. Gaps and negatives are
+		// fine: every read sorts on the raw value, and refresh() normalises the
+		// type back to 1..N the next time its list screen is rendered.
+		$to_top = ( 'top' === $this->get_new_post_position() );
+
+		// $aggregate is one of two hard-coded literals, never user input; every
+		// value in the statement is still bound through prepare().
+		$aggregate = $to_top ? 'MIN' : 'MAX';
+		$sql       = "SELECT $aggregate(menu_order) FROM $wpdb->posts
+			WHERE post_type = %s AND ID <> %d AND post_status IN ('publish','pending','draft','private','future')";
+
+		// phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+		$boundary = $wpdb->get_var( $wpdb->prepare( $sql, $post->post_type, $post_id ) );
+
+		if ( null === $boundary ) {
+			$menu_order = 1; // No siblings yet — first item of the type starts the sequence.
+		} else {
+			$menu_order = $to_top ? (int) $boundary - 1 : (int) $boundary + 1;
+		}
+
+		// menu_order 0 is this handler's "not yet placed" sentinel (see the guard
+		// above), so never write it — a post landing on 0 would be re-placed on
+		// every subsequent save. Stepping past it keeps the post at the top.
+		if ( 0 === $menu_order ) {
+			$menu_order = $to_top ? -1 : 1;
+		}
+
+		$wpdb->update( $wpdb->posts, [ 'menu_order' => $menu_order ], [ 'ID' => $post_id ] );
+		clean_post_cache( $post_id );
+	}
+
+	/* ---- #76 / #89: optional numeric "Order" column ------------------ */
+
+	/**
+	 * Register the Order column + assets on enabled list screens, gated by the
+	 * setting and the reorder capability.
+	 *
+	 * @return void
+	 */
+	public function setup_order_column(): void {
+		if ( ! $this->is_order_column_enabled() || ! $this->scporder_user_can_reorder() ) {
+			return;
+		}
+		foreach ( $this->get_scporder_options_objects() as $type ) {
+			$type = sanitize_key( $type );
+			// The numeric column does a flat renumber, which would fight the page
+			// tree on hierarchical types. Proper hierarchical ordering is #58 (2.9.0).
+			if ( is_post_type_hierarchical( $type ) ) {
+				continue;
+			}
+			add_filter( "manage_edit-{$type}_columns", [ $this, 'add_order_column' ] );
+			add_action( "manage_{$type}_posts_custom_column", [ $this, 'render_order_column' ], 10, 2 );
+		}
+		add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_order_column_assets' ] );
+	}
+
+	public function add_order_column( array $columns ): array {
+		$columns['scpo_order'] = __( 'Order', 'simple-custom-post-order' );
+		return $columns;
+	}
+
+	public function render_order_column( string $column, int $post_id ): void {
+		if ( 'scpo_order' !== $column ) {
+			return;
+		}
+
+		$order = (int) get_post_field( 'menu_order', $post_id );
+
+		// `scpo_set_position` requires edit_post on this specific row (2.8.3), but
+		// the column itself is registered off the broad reorder capability. Where
+		// the two disagree — most often a CPT registered with a custom
+		// `capability_type` and no `map_meta_cap`, so even administrators fail the
+		// meta-cap check — an editable input would render and then reject every
+		// save. Show the number read-only instead of a control that cannot work.
+		if ( ! current_user_can( 'edit_post', $post_id ) ) {
+			printf(
+				'<span class="scpo-order-static" title="%s">%d</span>',
+				esc_attr__( 'You do not have permission to reorder this item.', 'simple-custom-post-order' ),
+				$order
+			);
+			return;
+		}
+
+		printf(
+			'<input type="number" class="scpo-order-input small-text" value="%d" min="1" step="1" data-id="%d" aria-label="%s" />',
+			$order,
+			$post_id,
+			esc_attr__( 'Set position', 'simple-custom-post-order' )
+		);
+	}
+
+	public function enqueue_order_column_assets( $hook ): void {
+		if ( 'edit.php' !== $hook ) {
+			return;
+		}
+		$type = isset( $_GET['post_type'] ) ? sanitize_key( wp_unslash( $_GET['post_type'] ) ) : 'post';
+		if ( ! in_array( $type, $this->get_scporder_options_objects(), true ) ) {
+			return;
+		}
+		$suffix = ( defined( 'SCRIPT_DEBUG' ) && SCRIPT_DEBUG ) ? '' : '.min';
+		wp_enqueue_script( 'scpo-order-column', SCPORDER_URL . "/assets/scporder-order-column{$suffix}.js", [], SCPORDER_VERSION, true );
+		wp_localize_script( 'scpo-order-column', 'scpoOrderCol', [
+			'ajax_url' => $this->get_ajax_url(),
+			'nonce'    => wp_create_nonce( 'scporder_nonce_action' ),
+			// `error` is the last-resort fallback. The script prefers the server's
+			// own message, and uses the two specific strings below where it can tell
+			// the failure apart — one generic alert for every cause made these
+			// reports impossible to diagnose from the user's description.
+			'error'    => __( 'Couldn’t update the order — please try again.', 'simple-custom-post-order' ),
+			'expired'  => __( 'Your session expired and the order wasn’t saved. Please reload the page and try again.', 'simple-custom-post-order' ),
+			'network'  => __( 'Couldn’t reach the server, so the order wasn’t saved. Check your connection and try again.', 'simple-custom-post-order' ),
+		] );
+		add_action( 'admin_print_styles', [ $this, 'print_order_column_style' ] );
+	}
+
+	public function print_order_column_style(): void {
+		echo '<style>.column-scpo_order{width:70px}.scpo-order-input{width:58px}.scpo-order-input.is-saving{opacity:.5;pointer-events:none}.scpo-order-static{color:#646970;cursor:help}</style>';
+	}
+
+	/**
+	 * Move a post to an absolute position in its post type's order. Independent
+	 * of list pagination — the position is absolute across the whole type.
+	 *
+	 * @return void
+	 */
+	public function scpo_ajax_set_position(): void {
+		check_ajax_referer( 'scporder_nonce_action', 'nonce' );
+
+		if ( ! $this->scporder_user_can_reorder() ) {
+			wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
+		}
+
+		$post_id  = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+		$position = isset( $_POST['position'] ) ? absint( $_POST['position'] ) : 0;
+		$post     = $post_id ? get_post( $post_id ) : null;
+
+		if ( ! $post || ! in_array( $post->post_type, $this->get_scporder_options_objects(), true ) || is_post_type_hierarchical( $post->post_type ) ) {
+			wp_send_json_error( [ 'message' => __( 'Invalid item.', 'simple-custom-post-order' ) ] );
+		}
+
+		// Object-level authorization: holding the reorder capability is not enough,
+		// the user must be able to edit this specific post (defense against IDOR).
+		if ( ! current_user_can( 'edit_post', $post_id ) ) {
+			wp_send_json_error( [ 'message' => __( 'Permission denied.', 'simple-custom-post-order' ) ], 403 );
+		}
+
+		global $wpdb;
+		$ids = array_map(
+			'intval',
+			$wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT ID FROM $wpdb->posts
+					WHERE post_type = %s AND post_status IN ('publish','pending','draft','private','future')
+					ORDER BY menu_order ASC, post_date DESC",
+					$post->post_type
+				)
+			)
+		);
+
+		// Pull the post out, then splice it in at the requested 1-based position.
+		$ids    = array_values( array_diff( $ids, [ $post_id ] ) );
+		$target = max( 1, min( $position, count( $ids ) + 1 ) ) - 1;
+		array_splice( $ids, $target, 0, [ $post_id ] );
+
+		foreach ( $ids as $i => $id ) {
+			$wpdb->update( $wpdb->posts, [ 'menu_order' => $i + 1 ], [ 'ID' => (int) $id ] );
+			clean_post_cache( (int) $id );
+		}
+
+		do_action( 'scp_update_menu_order' );
+		wp_send_json_success( [ 'message' => __( 'Order updated.', 'simple-custom-post-order' ) ] );
+	}
+
+	/**
+	 * Whether previous/next adjacent-post links should be reversed relative to
+	 * the manual order.
+	 *
+	 * "Previous/next" under manual ordering is inherently ambiguous. The default
+	 * (false, the #146 behaviour since 2.7.2) treats "previous" as the item
+	 * *before* the current one in the arranged order and "next" as the item
+	 * *after* — the natural reading for sequential content (chapters, lessons,
+	 * steps). Sites/themes built around WordPress's native chronological
+	 * convention expect the opposite (the pre-2.7.2 direction); flip them back
+	 * with this filter without touching the theme's template tags. (#146)
+	 *
+	 * @return bool
+	 */
+	private function scporder_adjacent_reversed(): bool {
+		return (bool) apply_filters( 'scpo_reverse_adjacent_posts', false );
+	}
+
+	/**
+	 * Rewrite the adjacent-post WHERE so previous/next walk menu_order.
+	 *
+	 * Modern WP builds a compound clause with a date/ID tiebreaker, e.g.
+	 *   (p.post_date < 'X' OR (p.post_date = 'X' AND p.ID < N))
+	 * We strip that tiebreaker, then swap the remaining date comparison for a
+	 * menu_order comparison. "Previous" = the item immediately before this one in
+	 * the manual order — i.e. the largest menu_order below the current post (#146).
+	 *
+	 * @param string $where
+	 * @return string
+	 */
 	public function scporder_previous_post_where( string $where ): string {
 		global $post;
 
@@ -817,7 +1688,10 @@ class SCPO_Engine {
 		}
 
 		if ( isset( $post->post_type ) && in_array( $post->post_type, $objects, true ) ) {
-			$where = preg_replace( "/p.post_date < \'[0-9\-\s\:]+\'/i", "p.menu_order > '" . $post->menu_order . "'", $where );
+			$mo       = (int) $post->menu_order;
+			$operator = $this->scporder_adjacent_reversed() ? '>' : '<';
+			$where    = preg_replace( "/\s+OR\s+\(\s*p\.post_date = '[^']*'\s+AND\s+p\.ID [<>] \d+\s*\)/i", '', $where );
+			$where    = preg_replace( "/p\.post_date [<>] '[^']*'/i", "p.menu_order " . $operator . " '" . $mo . "'", $where );
 		}
 		return $where;
 	}
@@ -831,11 +1705,19 @@ class SCPO_Engine {
 		}
 
 		if ( isset( $post->post_type ) && in_array( $post->post_type, $objects, true ) ) {
-			$orderby = 'ORDER BY p.menu_order ASC LIMIT 1';
+			$direction = $this->scporder_adjacent_reversed() ? 'ASC' : 'DESC';
+			$orderby   = 'ORDER BY p.menu_order ' . $direction . ' LIMIT 1';
 		}
 		return $orderby;
 	}
 
+	/**
+	 * "Next" = the item immediately after this one in the manual order — i.e. the
+	 * smallest menu_order above the current post (#146).
+	 *
+	 * @param string $where
+	 * @return string
+	 */
 	public function scporder_next_post_where( string $where ): string {
 		global $post;
 
@@ -845,7 +1727,10 @@ class SCPO_Engine {
 		}
 
 		if ( isset( $post->post_type ) && in_array( $post->post_type, $objects, true ) ) {
-			$where = preg_replace( "/p.post_date > \'[0-9\-\s\:]+\'/i", "p.menu_order < '" . $post->menu_order . "'", $where );
+			$mo       = (int) $post->menu_order;
+			$operator = $this->scporder_adjacent_reversed() ? '<' : '>';
+			$where    = preg_replace( "/\s+OR\s+\(\s*p\.post_date = '[^']*'\s+AND\s+p\.ID [<>] \d+\s*\)/i", '', $where );
+			$where    = preg_replace( "/p\.post_date [<>] '[^']*'/i", "p.menu_order " . $operator . " '" . $mo . "'", $where );
 		}
 		return $where;
 	}
@@ -859,7 +1744,8 @@ class SCPO_Engine {
 		}
 
 		if ( isset( $post->post_type ) && in_array( $post->post_type, $objects, true ) ) {
-			$orderby = 'ORDER BY p.menu_order DESC LIMIT 1';
+			$direction = $this->scporder_adjacent_reversed() ? 'DESC' : 'ASC';
+			$orderby   = 'ORDER BY p.menu_order ' . $direction . ' LIMIT 1';
 		}
 		return $orderby;
 	}
@@ -871,11 +1757,26 @@ class SCPO_Engine {
 			return;
 		}
 
-		if ( is_search() ) {
+		$is_admin = is_admin() && ! wp_doing_ajax();
+
+		/*
+		 * Skip our ordering during a genuine search.
+		 *
+		 * On the front end WP's is_search() is the correct signal. In the admin
+		 * it is not: WordPress marks a query as a search whenever the `s` var is
+		 * merely *present* (isset(), not a non-empty value), and the Posts list
+		 * screen's filter form — the "All dates" and category dropdowns — always
+		 * submits an empty `s=` alongside the (empty) search box. So is_search()
+		 * reads true even though nobody searched, and the manual order silently
+		 * disappeared the moment a user filtered the list. In the admin,
+		 * therefore, bail only on a *non-empty* search term; real admin searches
+		 * still carry a non-empty `s` and are skipped exactly as before. (#153)
+		 */
+		if ( ( $is_admin && '' !== $wp_query->get( 's' ) ) || ( ! $is_admin && is_search() ) ) {
 			return;
 		}
 
-		if ( is_admin() && ! wp_doing_ajax() ) {
+		if ( $is_admin ) {
 			if ( isset( $wp_query->query['post_type'] ) && ! isset( $_GET['orderby'] ) ) {
 				if ( in_array( $wp_query->query['post_type'], $objects, true ) ) {
 					if ( ! $wp_query->get( 'orderby' ) ) {
@@ -927,36 +1828,80 @@ class SCPO_Engine {
 			return $orderby;
 		}
 
+		// Honor an explicit `include` ordering requested by the caller (PR #67 / issue #66).
+		if ( isset( $args['orderby'] ) && 'include' === $args['orderby'] ) {
+			return $orderby;
+		}
+
 		$tags = $this->get_scporder_options_tags();
 
-		if ( ! isset( $args['taxonomy'] ) ) {
+		if ( empty( $tags ) || ! isset( $args['taxonomy'] ) ) {
 			return $orderby;
 		}
 
-		if ( is_array( $args['taxonomy'] ) ) {
-			$taxonomy = $args['taxonomy'][0] ?? false;
-		} else {
-			$taxonomy = $args['taxonomy'];
-		}
-
-		if ( ! in_array( $taxonomy, $tags, true ) ) {
+		// Apply our ordering if ANY queried taxonomy is sortable — not just the
+		// first one — and keep the caller's orderby as a fallback tiebreaker (PR #104).
+		$taxonomies = array_map( 'strval', (array) $args['taxonomy'] );
+		if ( empty( array_intersect( $taxonomies, $tags ) ) ) {
 			return $orderby;
 		}
 
-		return 't.term_order';
+		return '' !== $orderby ? 't.term_order, ' . $orderby : 't.term_order';
 	}
 
-	public function scporder_get_object_terms( array $terms ): array {
-		$tags = $this->get_scporder_options_tags();
+	/**
+	 * Filter callback for `wp_get_object_terms` (passes $args as the 4th argument).
+	 *
+	 * @param mixed $terms       Terms (array of objects, IDs, etc.).
+	 * @param mixed $object_ids  Unused.
+	 * @param mixed $taxonomies  Unused.
+	 * @param array $args        Query args.
+	 * @return mixed
+	 */
+	public function scporder_get_object_terms( $terms, $object_ids = null, $taxonomies = null, $args = array() ) {
+		return $this->sort_terms_by_order( $terms, is_array( $args ) ? $args : array() );
+	}
 
+	/**
+	 * Filter callback for `get_terms` (passes $args as the 3rd argument).
+	 *
+	 * @param mixed $terms      Terms.
+	 * @param mixed $taxonomies Unused.
+	 * @param array $args       Query args.
+	 * @return mixed
+	 */
+	public function scporder_get_terms( $terms, $taxonomies = null, $args = array() ) {
+		return $this->sort_terms_by_order( $terms, is_array( $args ) ? $args : array() );
+	}
+
+	/**
+	 * Re-sort returned terms by term_order, unless the caller asked for a specific
+	 * order. Shared by the get_terms / wp_get_object_terms callbacks above.
+	 *
+	 * @param mixed $terms Terms as returned by core.
+	 * @param array $args  Query args.
+	 * @return mixed
+	 */
+	private function sort_terms_by_order( $terms, array $args ) {
+		if ( ! is_array( $terms ) || empty( $terms ) ) {
+			return $terms;
+		}
+
+		// Admin column sorting wins.
 		if ( is_admin() && ! wp_doing_ajax() && isset( $_GET['orderby'] ) ) {
 			return $terms;
 		}
 
+		// Honor an explicit `include` ordering requested by the caller (PR #67 / issue #66).
+		if ( isset( $args['orderby'] ) && 'include' === $args['orderby'] ) {
+			return $terms;
+		}
+
+		$tags = $this->get_scporder_options_tags();
+
 		foreach ( $terms as $term ) {
 			if ( is_object( $term ) && isset( $term->taxonomy ) ) {
-				$taxonomy = $term->taxonomy;
-				if ( ! in_array( $taxonomy, $tags, true ) ) {
+				if ( ! in_array( $term->taxonomy, $tags, true ) ) {
 					return $terms;
 				}
 			} else {

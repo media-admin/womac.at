@@ -19,7 +19,8 @@ use FluentCrm\App\Services\Funnel\FunnelProcessor;
 use FluentCrm\App\Services\Helper;
 use FluentCrm\App\Services\Sanitize;
 use FluentCrm\Framework\Support\Arr;
-use FluentCrm\Framework\Request\Request;
+use FluentCrm\Framework\Support\Collection;
+use FluentCrm\Framework\Http\Request\Request;
 
 /**
  *  SubscriberController - REST API Handler Class
@@ -47,7 +48,7 @@ class SubscriberController extends Controller
             $queryArgs = [
                 'with'               => $with,
                 'filter_type'        => 'advanced',
-                'filters_groups_raw' => $this->request->getJson('advanced_filters'),
+                'filters_groups_raw' => Helper::parseArrayOrJson($this->request->get('advanced_filters')),
                 'search'             => trim(sanitize_text_field($this->request->get('search', ''))),
                 'sort_by'            => sanitize_sql_orderby($this->request->get('sort_by', 'id')),
                 'sort_type'          => sanitize_sql_orderby($this->request->get('sort_type', 'DESC')),
@@ -66,6 +67,7 @@ class SubscriberController extends Controller
                 'custom_fields' => $this->request->get('custom_fields') == 'true',
                 'tags'          => $this->request->get('tags', []),
                 'statuses'      => $this->request->get('statuses', []),
+                'sms_statuses'  => $this->request->get('sms_statuses', []),
                 'lists'         => $this->request->get('lists', []),
                 'company_ids'   => $this->request->get('company_ids', []),
             ];
@@ -152,7 +154,7 @@ class SubscriberController extends Controller
             $subscriber->custom_values = (object)$subscriber->custom_fields();
         }
 
-        if ($subscriber->date_of_birth == '0000-00-00') {
+        if ($subscriber->date_of_birth == '0000-00-00' || empty($subscriber->date_of_birth)) {
             $subscriber->date_of_birth = '';
         }
 
@@ -178,13 +180,34 @@ class SubscriberController extends Controller
 
     public function updateProperty()
     {
-        $column = $this->request->getSafe('property');
-        $value = $this->request->getSafe('value');
-        $subscriberIds = $this->request->getSafe('subscribers', [], 'intval');
+        $column = $this->request->getSafe('property', 'sanitize_text_field');
+        $value = $this->request->getSafe('value', 'sanitize_text_field');
+        
+        $subscriberIds = $this->request->get('subscribers');
+        
+        if (!is_array($subscriberIds)) {
+            $subscriberIds = [$subscriberIds]; // say, this is single value, convert to array
+        }
 
-        $validColumns = ['status', 'contact_type', 'avatar', 'company_id'];
+        $subscriberIds = array_map('intval', $subscriberIds);
+        $subscriberIds = array_unique(array_filter($subscriberIds));
+
+        // $validColumns = ['status', 'contact_type', 'avatar', 'company_id', 'sms_status', 'whatsapp_status'];
+        $validColumns = ['status', 'contact_type', 'avatar', 'company_id', 'sms_status'];
         $subscriberStatuses = fluentcrm_subscriber_statuses();
         $leadStatuses = fluentcrm_contact_types();
+        $smsStatuses = apply_filters('fluentcrm_sms_statuses', [
+            'sms_subscribed',
+            'sms_unsubscribed',
+            'sms_pending',
+            'sms_bounced'
+        ]);
+        // Resolve WhatsApp statuses through a filter so Pro/third-party
+        // extensions can extend the vocabulary, mirroring how SMS statuses work.
+        // $whatsappStatuses = apply_filters('fluent_crm/whatsapp_statuses', [
+        //     'whatsapp_subscribed',
+        //     'whatsapp_unsubscribed'
+        // ]);
 
         $this->validate([
             'column'         => $column,
@@ -210,7 +233,16 @@ class SubscriberController extends Controller
             ]);
         } else if ($column == 'company_id') {
             Company::findOrFail($value); // just a check
+        } else if ($column == 'sms_status' && !in_array($value, $smsStatuses)) {
+            return $this->sendError([
+                'message' => __('Value is not valid', 'fluent-crm')
+            ]);
         }
+        // } else if ($column == 'whatsapp_status' && !in_array($value, $whatsappStatuses)) {
+        //     return $this->sendError([
+        //         'message' => __('Value is not valid', 'fluent-crm')
+        //     ]);
+        // }
 
         $subscribers = Subscriber::whereIn('id', $subscriberIds)->get();
 
@@ -219,7 +251,8 @@ class SubscriberController extends Controller
             if ($oldValue != $value) {
                 $subscriber->{$column} = $value;
                 $subscriber->save();
-                if (in_array($column, ['status', 'contact_type'])) {
+                // if (in_array($column, ['status', 'contact_type', 'sms_status', 'whatsapp_status'])) {
+                if (in_array($column, ['status', 'contact_type', 'sms_status'])) {
                     do_action('fluentcrm_subscriber_' . $column . '_to_' . $value, $subscriber, $oldValue);
 
                     if ($column == 'status') {
@@ -232,7 +265,31 @@ class SubscriberController extends Controller
                          *
                          */
                         do_action('fluent_crm/subscriber_status_changed', $subscriber, $oldValue, $value);
+                    } else if ($column == 'sms_status') {
+                        /**
+                         * Contact's SMS Status has been changed
+                         *
+                         * @param Subscriber $subscriber Subscriber Model.
+                         * @param string $oldStatus Old SMS Status.
+                         * @since 3.0.0
+                         *
+                         */
+                        do_action('fluent_crm/subscriber_sms_status_changed', $subscriber, $oldValue, $value);
                     }
+                    // } else if ($column == 'whatsapp_status') {
+                    //     /**
+                    //      * Contact's WhatsApp Status has been changed
+                    //      *
+                    //      * @param Subscriber $subscriber Subscriber Model.
+                    //      * @param string $oldValue Old WhatsApp Status.
+                    //      * @param string $value New WhatsApp Status.
+                    //      */
+                    //     if ($value === 'whatsapp_subscribed') {
+                    //         do_action('fluent_crm/contact_whatsapp_subscribed', $subscriber, $oldValue, $value);
+                    //     } else {
+                    //         do_action('fluent_crm/contact_whatsapp_unsubscribed', $subscriber, $oldValue, $value);
+                    //     }
+                    // }
 
                 }
                 if ($column == 'avatar') {
@@ -269,7 +326,7 @@ class SubscriberController extends Controller
         Helper::deleteContacts($subscriberIds);
 
         return $this->sendSuccess([
-            'message' => __('Selected Subscribers has been deleted', 'fluent-crm')
+            'message' => __('Selected Subscribers have been deleted', 'fluent-crm')
         ]);
     }
 
@@ -288,6 +345,12 @@ class SubscriberController extends Controller
 
         foreach ($subscribers as $subscriberId) {
             $subscriber = Subscriber::find($subscriberId);
+
+            // A selected contact may have been deleted concurrently
+            if (!$subscriber) {
+                continue;
+            }
+
             if ($attachments) {
                 if ($type == 'tags') {
                     $subscriber->attachTags($attachments);
@@ -364,7 +427,7 @@ class SubscriberController extends Controller
 
             $double_optin = filter_var($request->get('double_optin'), FILTER_VALIDATE_BOOLEAN);
 
-            if ($double_optin) {
+            if ($double_optin && $contact->status == 'pending') {
                 $contact->sendDoubleOptinEmail();
             }
 
@@ -375,27 +438,35 @@ class SubscriberController extends Controller
             ];
 
         } else if ($forceUpdate) {
-            $contact = FluentCrmApi('contacts')->createOrUpdate($data, false, false);
+            // The admin explicitly confirmed "update the existing contact" (__force_update).
+            // Force only when the existing contact is NOT currently subscribed: that lets
+            // the confirmed dialog overwrite a suppressed status (explicit operator
+            // decision — forced updates are honored unconditionally) without letting it
+            // demote a subscribed contact to the add-form's default 'pending'.
+            $existingContact = Subscriber::where('email', $data['email'])->first();
+            $shouldForce = $existingContact && $existingContact->status != 'subscribed';
+
+            $contact = FluentCrmApi('contacts')->createOrUpdate($data, $shouldForce, false);
 
             if ($contact && $contact->status == 'pending') {
                 $contact->sendDoubleOptinEmail();
             }
 
             return $this->sendSuccess([
-                'message'     => __('contact has been successfully updated.', 'fluent-crm'),
+                'message'     => __('Contact has been successfully updated.', 'fluent-crm'),
                 'contact'     => $contact,
                 'action_type' => 'updated'
             ]);
         }
 
         return $this->sendError([
-            'message' => __('Sorry contact already exist', 'fluent-crm')
+            'message' => __('Sorry, contact already exists', 'fluent-crm')
         ], 422);
     }
 
     public function bulkAddUpdate(Request $request)
     {
-        $contacts = $request->getJson('contacts', []);
+        $contacts = Helper::parseArrayOrJson($request->get('contacts'));
         $invalids = [];
         $created = [];
         $updated = [];
@@ -405,6 +476,11 @@ class SubscriberController extends Controller
 
         foreach ($contacts as $contact) {
             $contactData = Sanitize::contact($contact);
+            // Link the contact to a WP user by email only (see updateSubscriber);
+            // Subscriber::updateOrCreate() trusts a supplied user_id, so a client value
+            // here would allow the same admin-linking mass-assignment. WP-user syncing
+            // that legitimately needs a server-derived user_id uses UsersController.
+            unset($contactData['user_id']);
             if (empty($contactData['email']) || !is_email($contactData['email'])) {
                 $invalids[] = $contactData;
                 continue;
@@ -423,7 +499,7 @@ class SubscriberController extends Controller
                 $createdContact->sendDoubleOptinEmail();
             }
 
-            if ($contact->wasRecentlyCreated) {
+            if ($createdContact->wasRecentlyCreated) {
                 $created[] = [
                     'id'     => $createdContact->id,
                     'email'  => $createdContact->email,
@@ -449,7 +525,7 @@ class SubscriberController extends Controller
     public function updateSubscriber(Request $request, $id)
     {
         $subscriber = Subscriber::findOrFail($id);
-        $originalData = $request->getJson('subscriber');
+        $originalData = Helper::parseArrayOrJson($request->get('subscriber'));
 
         if (!$originalData) {
             $originalData = $request->all();
@@ -466,6 +542,13 @@ class SubscriberController extends Controller
             $data = $originalData;
         }
 
+        // Never trust a client-supplied user_id. It links the contact to a WordPress
+        // user account and must be derived solely from the validated email below.
+        // Accepting it from the request lets a contact be linked to an arbitrary WP
+        // user (e.g. an administrator); chained with {{user.*}} smartcodes on a custom
+        // email send, that enables administrator account takeover.
+        unset($data['user_id']);
+
         if (isset($data['email'])) {
             // Maybe update user id
             $user = get_user_by('email', $data['email']);
@@ -480,7 +563,10 @@ class SubscriberController extends Controller
              *
              */
             if (!$user && apply_filters('fluentcrm_update_wp_user_email_on_change', false)) {
-                $user = get_user_by('ID', $data['user_id']);
+                // Resolve the currently linked WP user from the stored link, not from
+                // request input, so the email-on-change update targets this contact's
+                // own WP user rather than an attacker-chosen id.
+                $user = get_user_by('ID', $subscriber->user_id);
             }
 
             $data['user_id'] = $user ? $user->ID : NULL;
@@ -491,7 +577,7 @@ class SubscriberController extends Controller
         }
 
         if (isset($data['date_of_birth']) && empty($data['date_of_birth'])) {
-            $data['date_of_birth'] = '0000-00-00';
+            $data['date_of_birth'] = NULL;
         }
 
         $validData = Sanitize::contact($data);
@@ -500,20 +586,52 @@ class SubscriberController extends Controller
         unset($validData['last_activity']);
         $customValues = Arr::get($originalData, 'custom_values', []);
 
-
         $oldEmail = $subscriber->email;
+
+        $oldSubscriber = clone $subscriber;
+
+        // Route status changes through updateStatus() so the status-transition hooks fire
+        // (Cleanup@handleUnsubscribe cancels queued emails/funnels for suppressed statuses,
+        // FunnelHandler resumes funnels on re-subscribe). fill()+save() would flip the
+        // column silently and leave automation state diverged from the contact status.
+        $requestedStatus = Arr::get($validData, 'status');
+        unset($validData['status']);
+
+        if ($requestedStatus && (!in_array($requestedStatus, fluentcrm_subscriber_statuses()) || $requestedStatus == $subscriber->status)) {
+            $requestedStatus = null;
+        }
+
+        $statusChangedEarly = false;
+
+        // A SUPPRESSING status change is applied BEFORE the tag/list sync below, so
+        // tag-applied automations fired within this same request already see the contact
+        // as suppressed and park instead of executing. A non-suppressing change (e.g. a
+        // re-subscribe) is applied AFTER the sync — see below — so funnel-resume and
+        // 'Status Changed' listeners evaluate the contact's final tag/list state.
+        if ($requestedStatus && in_array($requestedStatus, fluentcrm_strict_statues())) {
+            $subscriber->updateStatus($requestedStatus);
+            $statusChangedEarly = true;
+            $requestedStatus = null;
+        }
 
         $subscriber->fill($validData);
 
         $dirtyFields = $subscriber->getDirty();
 
-
         if ($dirtyFields) {
             $subscriber->save();
         }
 
+        if ($statusChangedEarly) {
+            $dirtyFields['status'] = $subscriber->status;
+        }
+
         if ($customValues) {
+            $originalCustomFields = $subscriber->custom_fields();
             $subscriber->syncCustomFieldValues($customValues, true);
+            $dirtyCustomValues = $oldSubscriber->custom_fields();
+
+            do_action('fluent_crm/contact_updated_with_changes', $subscriber, $dirtyCustomValues, $originalCustomFields, ['source' => 'web', 'type' => 'custom_fields_only']);
         }
 
         if ($tags = Arr::get($originalData, 'attach_tags', [])) {
@@ -532,6 +650,15 @@ class SubscriberController extends Controller
             $subscriber->detachLists($detachLists);
         }
 
+        // Non-suppressing status transitions run AFTER the tag/list sync above so the
+        // status-change hooks (funnel resume, 'Status Changed' triggers) evaluate the
+        // contact's final tag/list state. (Suppressing transitions already ran before
+        // the sync — see $statusChangedEarly above.)
+        if ($requestedStatus && $requestedStatus != $subscriber->status) {
+            $subscriber->updateStatus($requestedStatus);
+            $dirtyFields['status'] = $requestedStatus;
+        }
+
         if ($dirtyFields) {
 
             if (isset($dirtyFields['email'])) {
@@ -548,6 +675,8 @@ class SubscriberController extends Controller
 
             do_action('fluentcrm_contact_updated', $subscriber, $dirtyFields);
             do_action('fluent_crm/contact_updated', $subscriber, $dirtyFields);
+
+            do_action('fluent_crm/contact_updated_with_changes', $subscriber, $dirtyFields, $oldSubscriber, ['source' => 'web', 'type' => 'all_fields']);
 
         }
 
@@ -597,14 +726,14 @@ class SubscriberController extends Controller
     }
 
     /**
-     * Handles if subscriber already exist.
+     * Handles if subscriber already exists.
      *
      * @return bool
      */
     private function isNew()
     {
         $subscriber = Subscriber::where(
-            'email', $this->request->getSafe('email', '', 'sanitize_email')
+            'email', $this->request->getSafe('email', 'sanitize_email', '')
         )->first();
 
         if ($subscriber) {
@@ -639,12 +768,17 @@ class SubscriberController extends Controller
             $emails = [];
 
             if (!empty($getLogsByCurrentUser)) {
+                global $wpdb;
                 $emails = fluentMailDb()->table(FLUENT_MAIL_DB_PREFIX . 'email_logs')
-                    ->where('to', 'LIKE', '%' . $getLogsByCurrentUser . '%')
+                    ->where('to', 'LIKE', '%' . $wpdb->esc_like($getLogsByCurrentUser) . '%')
                     ->orderBy('id', 'DESC')
                     ->paginate();
 
-                // Format the email log results
+                // Format the email log results. The FluentSMTP log stores full rendered
+                // bodies (including password-reset links and other secrets sent to the
+                // address); formatResult() redacts any body containing sensitive data so
+                // a contact manager cannot read, e.g., an admin's reset link from a
+                // contact created with the admin's email address.
                 $emails['data'] = $this->formatResult($emails['data']);
             }
         }
@@ -680,9 +814,71 @@ class SubscriberController extends Controller
             $result[$key]['retries'] = (int)$result[$key]['retries'];
             $result[$key]['from'] = htmlspecialchars($result[$key]['from']);
             $result[$key]['subject'] = wp_kses_post(wp_unslash($result[$key]['subject']));
+
+            // Redact bodies that contain secrets (e.g. password-reset links) so they are
+            // not exposed in the contact email-log viewer, which is reachable by
+            // non-admin contact managers. See emailLogBodyHasSensitiveData().
+            if (isset($result[$key]['body']) && $this->emailLogBodyHasSensitiveData($result[$key]['body'])) {
+                $result[$key]['body'] = $this->getRedactedEmailBodyNotice();
+                $result[$key]['is_redacted'] = true;
+            }
         }
 
         return $result;
+    }
+
+    /**
+     * Detects whether a rendered email body contains sensitive material that must not be
+     * surfaced in the contact email-log viewer (accessible to non-admin contact managers).
+     *
+     * Currently matches WordPress password-reset / set-password links, which grant
+     * account takeover if read by anyone other than the recipient. The pattern list is
+     * filterable so integrations can register additional secrets (magic links, OTP URLs).
+     *
+     * @param string $body Rendered email HTML/text.
+     * @return bool
+     */
+    protected function emailLogBodyHasSensitiveData($body)
+    {
+        if (!$body || !is_string($body)) {
+            return false;
+        }
+
+        // WordPress reset links look like: wp-login.php?action=rp&key=...&login=...
+        $patterns = [
+            '/wp-login\.php\?action=(rp|resetpass)/i',
+            '/[?&]action=rp&(amp;)?key=/i',
+            '/[?&]key=[^&"\'\s]+&(amp;)?login=/i',
+        ];
+
+        /**
+         * Filter the regex patterns used to detect sensitive content in email-log bodies.
+         *
+         * @param array  $patterns Array of PCRE patterns.
+         * @param string $body     The rendered email body being inspected.
+         * @since 3.1.9
+         */
+        $patterns = apply_filters('fluent_crm/email_log_sensitive_patterns', $patterns, $body);
+
+        foreach ($patterns as $pattern) {
+            if (@preg_match($pattern, $body)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The placeholder shown in place of a redacted email-log body.
+     *
+     * @return string
+     */
+    protected function getRedactedEmailBodyNotice()
+    {
+        return '<div class="fc_redacted_email_body" style="padding:16px;border:1px solid #E1E4EA;border-radius:6px;background:#F5F7FA;color:#525866;">'
+            . esc_html__('This email contains sensitive information (such as a password reset or login link) and its content has been hidden for security reasons.', 'fluent-crm')
+            . '</div>';
     }
 
     public function deleteEmails(Request $request, $subscriberId)
@@ -692,20 +888,21 @@ class SubscriberController extends Controller
             ->whereIn('id', $emailIds)
             ->delete();
         return [
-            'message' => __('Selected emails has been deleted', 'fluent-crm')
+            'message' => __('Selected emails have been deleted', 'fluent-crm')
         ];
     }
 
     public function getNotes()
     {
-
         $subscriberId = $this->request->get('id');
         $search = $this->request->get('search');
+        $includeId = intval($this->request->get('include_id', 0));
 
         $notes = SubscriberNote::where('subscriber_id', $subscriberId);
 
         if (!empty($search)) {
-            $notes = $notes->where('title', 'LIKE', '%' . $search . '%');
+            global $wpdb;
+            $notes = $notes->where('title', 'LIKE', '%' . $wpdb->esc_like(sanitize_text_field($search)) . '%');
         }
 
         $notes = $notes->orderBy('id', 'DESC')
@@ -716,21 +913,36 @@ class SubscriberController extends Controller
         }
         $fields['fields'] = Helper::getNoteSyncFields();
 
-
-        return $this->sendSuccess([
+        $response = [
             'notes'  => $notes,
             'fields' => $fields
-        ]);
+        ];
+
+        if ($includeId) {
+            $noteIds = (new Collection($notes->items()))->pluck('id')->toArray();
+            if (!in_array($includeId, $noteIds)) {
+                $includedNote = SubscriberNote::where('id', $includeId)
+                    ->where('subscriber_id', $subscriberId)
+                    ->first();
+                if ($includedNote) {
+                    $includedNote->added_by = $includedNote->createdBy();
+                    $response['included_note'] = $includedNote;
+                }
+            }
+        }
+
+        return $this->sendSuccess($response);
     }
 
     public function addNote(Request $request, $id)
     {
         $subscriber = Subscriber::findOrFail($id);
+
         $note = $this->validate($request->get('note'), [
             'title'       => 'required',
             'description' => 'required',
             'type'        => 'required',
-            'created_at'  => 'sometimes|datetime'
+            'created_at'  => 'nullable|date'
         ]);
 
         if (empty($note['created_at'])) {
@@ -750,6 +962,12 @@ class SubscriberController extends Controller
         $note['subscriber_id'] = $id;
 
         $note = Sanitize::contactNote($note);
+
+        // Only persist server-trusted fields on this endpoint (mirrors updateNote): authorship
+        // is always the current user, and note metadata like parent_id/status is not
+        // client-settable here. Prevents forging note authorship / re-threading via the payload.
+        $note = Arr::only($note, ['subscriber_id', 'title', 'description', 'type', 'created_at']);
+        $note['created_by'] = get_current_user_id();
 
         $subscriberNote = SubscriberNote::create(wp_unslash($note));
 
@@ -777,7 +995,7 @@ class SubscriberController extends Controller
             'title'       => 'required',
             'description' => 'required',
             'type'        => 'required',
-            'created_at'  => 'sometimes|datetime'
+            'created_at'  => 'sometimes|date'
         ]);
 
         $note = Arr::only(wp_unslash($note), ['title', 'description', 'type', 'created_at']);
@@ -800,7 +1018,11 @@ class SubscriberController extends Controller
 
         $note = Sanitize::contactNote($note);
 
-        $subsciberNote = SubscriberNote::find($noteId);
+        // Scope the note to this contact so a note belonging to another contact cannot be
+        // edited by pairing its id with a different (accessible) contact route id.
+        $subsciberNote = SubscriberNote::where('id', $noteId)
+            ->where('subscriber_id', $subscriber->id)
+            ->firstOrFail();
         $subsciberNote->fill($note);
         $subsciberNote->save();
 
@@ -823,19 +1045,66 @@ class SubscriberController extends Controller
     public function deleteNote($id, $noteId)
     {
         $subscriber = Subscriber::findOrFail($id);
-        SubscriberNote::where('id', $noteId)->delete();
+        // Scope the delete to this contact so a note belonging to another contact cannot be
+        // deleted by pairing its id with a different (accessible) contact route id.
+        $deleted = SubscriberNote::where('id', $noteId)
+            ->where('subscriber_id', $subscriber->id)
+            ->delete();
 
-        /**
-         * Subscriber's Note Delete
-         *
-         * @param SubscriberNote $subscriberNote Note Model.
-         * @param Subscriber $subscriber Contact Model.
-         * @since 1.0
-         */
-        do_action('fluent_crm/note_delete', $noteId, $subscriber);
+        if ($deleted) {
+            /**
+             * Subscriber's Note Delete
+             *
+             * @param SubscriberNote $subscriberNote Note Model.
+             * @param Subscriber $subscriber Contact Model.
+             * @since 1.0
+             */
+            do_action('fluent_crm/note_delete', $noteId, $subscriber);
+        }
 
         return $this->sendSuccess([
             'message' => __('Note successfully deleted', 'fluent-crm')
+        ]);
+    }
+
+    public function bulkDeleteNotes(Request $request, $id)
+    {
+        $subscriber = Subscriber::findOrFail($id);
+        $noteIds = array_filter(array_map('intval', (array) $request->get('note_ids', [])));
+
+        if (empty($noteIds)) {
+            return $this->sendError([
+                'message' => __('No note IDs provided', 'fluent-crm')
+            ]);
+        }
+
+        if (count($noteIds) > 200) {
+            return $this->sendError([
+                'message' => __('Too many notes selected. Please delete 200 or fewer notes at a time.', 'fluent-crm')
+            ]);
+        }
+
+        // Scope delete to this subscriber so users cannot delete notes belonging to other contacts.
+        $deletableNoteIds = SubscriberNote::where('subscriber_id', $subscriber->id)
+            ->whereIn('id', $noteIds)
+            ->pluck('id')
+            ->toArray();
+
+        $deletedCount = 0;
+        if ($deletableNoteIds) {
+            $deletedCount = SubscriberNote::whereIn('id', $deletableNoteIds)->delete();
+
+            foreach ($deletableNoteIds as $deletedNoteId) {
+                do_action('fluent_crm/note_delete', $deletedNoteId, $subscriber);
+            }
+        }
+
+        return $this->sendSuccess([
+            'message' => sprintf(
+                /* translators: %d: number of deleted notes */
+                _n('%d note deleted', '%d notes deleted', $deletedCount, 'fluent-crm'),
+                $deletedCount
+            )
         ]);
     }
 
@@ -843,7 +1112,7 @@ class SubscriberController extends Controller
     {
         $provider = $this->request->get('provider');
         $subscriberId = intval($this->request->get('id'));
-        $subscriber = Subscriber::where('id', $subscriberId)->first();
+        $subscriber = Subscriber::findOrFail($subscriberId);
 
         /**
          * Filter the form submissions data for a specific provider.
@@ -859,6 +1128,11 @@ class SubscriberController extends Controller
          * @param object $subscriber The subscriber object.
          * @since 2.5.1
          *
+         * Security: the returned column values are rendered as raw HTML in the admin UI
+         * (Vue v-html) without client-side sanitization. Producers hooking this filter MUST
+         * escape any subscriber-authored data (e.g. via esc_html() / wp_kses_post()) before
+         * returning it, to prevent stored XSS in the admin. Structural markup and intentional
+         * rich content are allowed by design.
          */
         $data = apply_filters('fluentcrm_get_form_submissions_' . $provider, [
             'data'  => [],
@@ -890,6 +1164,11 @@ class SubscriberController extends Controller
          * @param object $subscriber The subscriber object.
          * @since 2.5.1
          *
+         * Security: the returned column values are rendered as raw HTML in the admin UI
+         * (Vue v-html) without client-side sanitization. Producers hooking this filter MUST
+         * escape any subscriber-authored data (e.g. via esc_html() / wp_kses_post()) before
+         * returning it, to prevent stored XSS in the admin. Structural markup and intentional
+         * rich content are allowed by design.
          */
         $data = apply_filters('fluentcrm-get_support_tickets_' . $provider, [
             'data'  => [],
@@ -922,15 +1201,26 @@ class SubscriberController extends Controller
 
     public function sendDoubleOptinEmail(Request $request, $id)
     {
-        $subscriber = Subscriber::where('id', $id)->first();
+        $subscriber = Subscriber::findOrFail($id);
 
-        if ($subscriber == 'subscribed') {
+        if ($subscriber->status == 'subscribed') {
             return $this->sendError([
                 'message' => __('Contact Already Subscribed', 'fluent-crm')
             ]);
         }
 
-        $subscriber->sendDoubleOptinEmail();
+        // The admin explicitly asked for an opt-in send, and the opt-in email is
+        // strictly gated on status == 'pending' — so this caller moves the contact
+        // into the opt-in pipeline first (that status decision is the caller's).
+        if ($subscriber->status != 'pending') {
+            $subscriber->updateStatus('pending');
+        }
+
+        if (!$subscriber->sendDoubleOptinEmail()) {
+            return $this->sendError([
+                'message' => __('Double opt-in email could not be sent. Please check the double opt-in settings; resends are also throttled for a couple of minutes.', 'fluent-crm')
+            ]);
+        }
 
         return $this->sendSuccess([
             'message' => __('Double OptIn email has been sent', 'fluent-crm')
@@ -959,15 +1249,26 @@ class SubscriberController extends Controller
         }
 
         add_action('wp_mail_failed', function ($wpError) {
-            return $this->sendError([
-                'message' => $wpError->get_error_message()
-            ]);
+            Helper::debugLog(
+                'Custom Email failed',
+                $wpError->get_error_message(),
+                'error'
+            );
         }, 10, 1);
 
         $newCampaign = $request->get('campaign');
         unset($newCampaign['id']);
 
         $newCampaign = Sanitize::campaign($newCampaign);
+
+        // Title and status are decided server side, not by the client: the
+        // one-off composer has no title field (it only edits subject/body), so
+        // whatever the client posts is the hardcoded mock string. Deriving both
+        // here keeps every one-off row identifiable and keeps this path in
+        // lockstep with the MCP send-email-to-contact tool, which writes the
+        // same status. See Helper::oneOffEmailTitle() for the title shape.
+        $newCampaign['title'] = Helper::oneOffEmailTitle($contact->email);
+        $newCampaign['status'] = 'published';
 
         $campaign = CustomEmailCampaign::create($newCampaign);
 
@@ -1002,13 +1303,17 @@ class SubscriberController extends Controller
          * @param object $subscriber The subscriber object.
          * @since 2.5.1
          *
+         * Security: `content_html` is rendered as raw HTML in the admin UI (Vue v-html)
+         * without client-side sanitization. Producers hooking this filter MUST escape any
+         * subscriber-authored data (e.g. via esc_html() / wp_kses_post()) before returning it,
+         * to prevent stored XSS in the admin. Structural markup and intentional rich content
+         * (styles, iframes, scripts) are allowed by design.
          */
         return apply_filters('fluencrm_profile_section_' . $sectionId, [
             'heading'      => '',
             'content_html' => ''
         ], $subscriber);
     }
-
 
     public function saveExternalViewData(Request $request, $subscriberId)
     {
@@ -1092,9 +1397,13 @@ class SubscriberController extends Controller
 
             $subscribersModel = (new ContactsQuery($queryArgs))->getModel();
             $lastId = $request->get('last_id', 0);
+            $bulkActionLimit = (int)apply_filters('fluent_crm/contact_bulk_action_limit', 400, $request);
+            if ($bulkActionLimit < 1) {
+                $bulkActionLimit = 1;
+            }
 
             $subscribersModel = $subscribersModel->select(['id'])
-                ->limit(400)
+                ->limit($bulkActionLimit)
                 ->where('id', '>', $lastId)
                 ->get();
 
@@ -1102,7 +1411,7 @@ class SubscriberController extends Controller
                 return [
                     'is_completed'       => true,
                     'completed_contacts' => 0,
-                    'message'            => __('All contacts has been processed', 'fluent-crm')
+                    'message'            => __('All contacts have been processed', 'fluent-crm')
                 ];
             }
 
@@ -1126,7 +1435,7 @@ class SubscriberController extends Controller
             return $this->sendSuccess([
                 'completed_contacts' => count($subscriberIds),
                 'last_contact_id'    => $lastContactId,
-                'message'            => __('Selected Contacts has been deleted permanently', 'fluent-crm'),
+                'message'            => __('Selected Contacts have been deleted permanently', 'fluent-crm'),
             ]);
         } elseif ($actionName == 'send_double_optin') {
             Helper::sendDoubleOptin($subscriberIds);
@@ -1177,7 +1486,7 @@ class SubscriberController extends Controller
                 'last_contact_id'    => $lastContactId,
                 'completed_contacts' => count($subscriberIds),
                 /* translators: 1. Number of subscribers */
-                'message'            => sprintf(__('%d subscribers has been attached to the selected email sequence', 'fluent-crm'), count($validSubscribers))
+                'message'            => sprintf(__('%d subscribers have been attached to the selected email sequence', 'fluent-crm'), count($validSubscribers))
             ];
 
         } elseif ($actionName == 'add_to_company') {
@@ -1225,7 +1534,7 @@ class SubscriberController extends Controller
                 'last_contact_id'    => $lastContactId,
                 'completed_contacts' => count($subscriberIds),
                 /* translators: %d is the number of subscribers */
-                'message'            => sprintf(__('%d subscribers has been attached to the selected company', 'fluent-crm'), count($validSubscribers))
+                'message'            => sprintf(__('%d subscribers have been attached to the selected company', 'fluent-crm'), count($validSubscribers))
             ];
 
         } elseif ($actionName == 'remove_from_company') {
@@ -1273,7 +1582,7 @@ class SubscriberController extends Controller
                 'last_contact_id'    => $lastContactId,
                 'completed_contacts' => count($subscriberIds),
                 /* translators: %d is the number of subscribers */
-                'message'            => sprintf(__('%d subscribers has been detached from the selected company', 'fluent-crm'), count($validSubscribers))
+                'message'            => sprintf(__('%d subscribers have been detached from the selected company', 'fluent-crm'), count($validSubscribers))
             ];
 
         } elseif ($actionName == 'change_contact_status') {
@@ -1346,7 +1655,7 @@ class SubscriberController extends Controller
                 'last_contact_id'    => $lastContactId,
                 'completed_contacts' => count($subscriberIds),
                 /* translators: %d is the number of subscribers */
-                'message'            => sprintf(__('%d subscribers has been attached to the selected automation funnel', 'fluent-crm'), count($validSubscribers)),
+                'message'            => sprintf(__('%d subscribers have been attached to the selected automation funnel', 'fluent-crm'), count($validSubscribers)),
                 'subscribers'        => $validSubscribers
             ];
         } else if ($actionName == 'change_contact_type') {
@@ -1354,7 +1663,7 @@ class SubscriberController extends Controller
             $newType = sanitize_text_field($request->get('new_status', ''));
             if (!$newType) {
                 return $this->sendError([
-                    'message' => 'Please select new type'
+                    'message' => __('Please select new type', 'fluent-crm')
                 ]);
             }
             foreach ($subscribers as $subscriber) {
@@ -1384,8 +1693,11 @@ class SubscriberController extends Controller
             }
 
             foreach ($subscribers as $subscriber) {
+                // Scope to object_type = 'custom_field' (Behavioral Rule 11) so a field
+                // slugged like an internal meta key can't overwrite the internal row.
                 $existField = SubscriberMeta::where('key', $customFieldKey)
                     ->where('subscriber_id', $subscriber->id)
+                    ->where('object_type', 'custom_field')
                     ->first();
 
                 // check if exists
@@ -1486,7 +1798,7 @@ class SubscriberController extends Controller
 
         if (!$filterType || !$currentId) {
             return $this->sendError([
-                'message' => 'filter_type & current_id is required'
+                'message' => __('filter_type and current_id are required', 'fluent-crm')
             ]);
         }
 
@@ -1496,7 +1808,7 @@ class SubscriberController extends Controller
         if ($filterType == 'advanced') {
             $queryArgs = [
                 'filter_type'        => 'advanced',
-                'filters_groups_raw' => $this->request->getJson('advanced_filters'),
+                'filters_groups_raw' => Helper::parseArrayOrJson($this->request->get('advanced_filters')),
                 'search'             => trim(sanitize_text_field($this->request->get('search', ''))),
                 'sort_by'            => 'id',
                 'sort_type'          => $sortType,
@@ -1556,19 +1868,40 @@ class SubscriberController extends Controller
 
     public function searchContacts(Request $request)
     {
-        $search = trim($request->getSafe('search', ''));
+        $search = trim($request->getSafe('search', 'sanitize_text_field', ''));
+        $limit = absint($request->get('limit', 20));
+        if (!$limit) {
+            $limit = 20;
+        }
+        $offset = absint($request->get('offset', 0));
+
+        $loadDefault = $request->get('load_default');
+        $loadDefault = in_array($loadDefault, [true, 1, '1', 'true', 'yes'], true);
 
         $contacts = [];
 
         if ($search) {
-            $subscribers = Subscriber::searchBy($search)->limit($request->get('limit', 20))->get();
+            $subscribers = Subscriber::searchBy($search)->offset($offset)->limit($limit)->get();
             foreach ($subscribers as $subscriber) {
                 $contacts[$subscriber->id] = [
                     'first_name' => $subscriber->first_name,
                     'last_name'  => $subscriber->last_name,
                     'full_name'  => $subscriber->full_name,
                     'email'      => $subscriber->email,
-                    'id'         => (string)$subscriber->id
+                    'id'         => (string)$subscriber->id,
+                    'photo'      => $subscriber->photo
+                ];
+            }
+        } else if ($loadDefault) {
+            $subscribers = Subscriber::orderBy('id', 'DESC')->offset($offset)->limit($limit)->get();
+            foreach ($subscribers as $subscriber) {
+                $contacts[$subscriber->id] = [
+                    'first_name' => $subscriber->first_name,
+                    'last_name'  => $subscriber->last_name,
+                    'full_name'  => $subscriber->full_name,
+                    'email'      => $subscriber->email,
+                    'id'         => (string)$subscriber->id,
+                    'photo'      => $subscriber->photo
                 ];
             }
         }
@@ -1586,7 +1919,8 @@ class SubscriberController extends Controller
                         'last_name'  => $subscriber->last_name,
                         'full_name'  => $subscriber->full_name,
                         'email'      => $subscriber->email,
-                        'id'         => (string)$subscriber->id
+                        'id'         => (string)$subscriber->id,
+                        'photo'      => $subscriber->photo
                     ];
                 }
             }
@@ -1642,6 +1976,11 @@ class SubscriberController extends Controller
          * @param object $subscriber The subscriber object.
          * @since 2.8.0
          *
+         * Security: each widget's `content` is rendered as raw HTML in the admin UI (Vue
+         * v-html) without client-side sanitization. Producers hooking this filter MUST escape
+         * any subscriber-authored data (e.g. via esc_html() / wp_kses_post()) before returning
+         * it, to prevent stored XSS in the admin. Structural markup and intentional rich
+         * widget content (styles, iframes, scripts) are allowed by design.
          */
         $topWidgets = array_filter(apply_filters('fluent_crm/subscriber_top_widgets', array_filter([$commerce]), $subscriber));
 
@@ -1654,6 +1993,11 @@ class SubscriberController extends Controller
          * @param object $subscriber The subscriber object.
          * @since 2.8.0
          *
+         * Security: each widget's `content` is rendered as raw HTML in the admin UI (Vue
+         * v-html) without client-side sanitization. Producers hooking this filter MUST escape
+         * any subscriber-authored data (e.g. via esc_html() / wp_kses_post()) before returning
+         * it, to prevent stored XSS in the admin. Structural markup and intentional rich
+         * widget content (styles, iframes, scripts) are allowed by design.
          */
         $otherWidgets = apply_filters('fluent_crm/subscriber_info_widgets', [], $subscriber);
 
@@ -1750,5 +2094,43 @@ class SubscriberController extends Controller
             ];
         }
         return $result;
+    }
+
+    public function getDynamicItemView(Request $request, $subscriberId)
+    {
+        $subscriber = Subscriber::findOrFail($subscriberId);
+        $provider = (string)$request->get('provider');
+        $params = $request->get('params', []);
+
+        /**
+         * Filter the dynamic item view for a specific provider.
+         *
+         * The dynamic portion of the hook name, `$provider`, refers to the specific provider for which the view is being fetched.
+         *
+         * @param array  {
+         *     An array containing the dynamic item view data.
+         *
+         *      'type' => (string) The type of the dynamic item.
+         *      'title' => (string) The title of the dynamic item.
+         *      'content_html' => (string) The HTML content of the dynamic item.
+         *      'footer_content' => (string) The footer content associated with the dynamic item.
+         *
+         * }
+         * @param object $subscriber The subscriber object.
+         * @param array $params Additional parameters passed in the request.
+         * @since 3.0.0
+         *
+         */
+
+        $data = apply_filters('fluent_crm/dynamic_contact_item_view_' . $provider, [
+            'type'           => 'html',
+            'title'          => 'no title',
+            'content_html'   => 'sorry, no content found',
+            'footer_content' => ''
+        ], $params, $subscriber);
+
+        return [
+            'data_view' => $data
+        ];
     }
 }

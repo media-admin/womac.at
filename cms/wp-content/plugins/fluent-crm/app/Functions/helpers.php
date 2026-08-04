@@ -64,14 +64,16 @@ if (!function_exists('ddd')) {
 if (!function_exists('fluentCrmMix')) {
     /**
      * Generate URL for static assets for plugin's assets directory
+     * Now uses Vite helper for HMR support in dev mode
      *
      * @param string $path
+     * @param string $manifestDirectory (deprecated, kept for compatibility)
      *
      * @return string
      */
     function fluentCrmMix($path, $manifestDirectory = '')
     {
-        return FluentCrm('url.assets') . ltrim($path, '/');
+        return \FluentCrm\App\Vite::getEnqueuePath(ltrim($path, '/'));
     }
 }
 
@@ -93,6 +95,14 @@ function fluentCrmTimestamp($timestamp = null)
  */
 function fluentCrmGetTimezoneString()
 {
+    // wp_timezone_string() (WP 5.3+) returns either a named zone or a ±HH:MM
+    // offset — both valid DateTimeZone inputs. The legacy guess below used
+    // gmdate('I'), which is always '0' (UTC has no DST), so offset-only sites
+    // could match a wrong non-DST zone.
+    if (function_exists('wp_timezone_string')) {
+        return wp_timezone_string();
+    }
+
     // if site timezone string exists, return it
     $timezone = get_option('timezone_string');
     if ($timezone) {
@@ -342,6 +352,29 @@ function fluentcrm_delete_campaign_meta($campaignId, $key = '')
     return fluentcrm_delete_meta($campaignId, 'FluentCrm\App\Models\Campaign', $key);
 }
 
+function fluentcrm_get_sms_campaign_meta($campaignId, $key, $returnValue = false)
+{
+    $item = fluentcrm_get_meta($campaignId, 'FluentCampaign\App\Modules\SMS\Models\SMSCampaign', $key);
+    if ($returnValue) {
+        if ($item) {
+            return $item->value;
+        }
+        return false;
+    }
+
+    return $item;
+}
+
+function fluentcrm_update_sms_campaign_meta($campaignId, $key, $value)
+{
+    return fluentcrm_update_meta($campaignId, 'FluentCampaign\App\Modules\SMS\Models\SMSCampaign', $key, $value);
+}
+
+function fluentcrm_delete_sms_campaign_meta($campaignId, $key = '')
+{
+    return fluentcrm_delete_meta($campaignId, 'FluentCampaign\App\Modules\SMS\Models\SMSCampaign', $key);
+}
+
 /**
  * Get Email Campaign meta value
  * @param int $templateId ID of the template
@@ -419,8 +452,17 @@ function fluentcrm_delete_list_meta($listId, $key)
  */
 function fluentcrm_get_subscriber_meta($subscriberId, $key, $deafult = '')
 {
+    // fc_subscriber_meta is shared with contact custom fields (object_type =
+    // 'custom_field'). These internal-meta helpers must exclude them, or a custom
+    // field slugged like an internal key (e.g. "unsubscribe_reason") collides
+    // with — and corrupts — the internal row (Behavioral Rule 11).
     $item = SubscriberMeta::where('key', $key)
         ->where('subscriber_id', $subscriberId)
+        ->where(function ($q) {
+            // NULL-safe exclusion: legacy rows may carry a NULL object_type and
+            // `!= 'custom_field'` alone would drop them (NULL never compares true).
+            $q->whereNull('object_type')->orWhere('object_type', '!=', 'custom_field');
+        })
         ->first();
 
     if ($item && $item->value) {
@@ -440,9 +482,14 @@ function fluentcrm_get_subscriber_meta($subscriberId, $key, $deafult = '')
 function fluentcrm_update_subscriber_meta($subscriberId, $key, $value)
 {
     $value = maybe_serialize($value);
-    // check if exists
+    // check if exists — internal meta only, never a custom_field row (Rule 11)
     $model = SubscriberMeta::where('key', $key)
         ->where('subscriber_id', $subscriberId)
+        ->where(function ($q) {
+            // NULL-safe exclusion: legacy rows may carry a NULL object_type and
+            // `!= 'custom_field'` alone would drop them (NULL never compares true).
+            $q->whereNull('object_type')->orWhere('object_type', '!=', 'custom_field');
+        })
         ->first();
 
     if ($model) {
@@ -454,6 +501,7 @@ function fluentcrm_update_subscriber_meta($subscriberId, $key, $value)
     return SubscriberMeta::create([
         'key'           => $key,
         'created_by'    => get_current_user_id(),
+        'object_type'   => 'option',
         'value'         => $value,
         'subscriber_id' => $subscriberId,
         'created_at'    => fluentCrmTimestamp()
@@ -470,6 +518,11 @@ function fluentcrm_delete_subscriber_meta($subscriberId, $key)
 {
     return SubscriberMeta::where('key', $key)
         ->where('subscriber_id', $subscriberId)
+        ->where(function ($q) {
+            // NULL-safe exclusion: legacy rows may carry a NULL object_type and
+            // `!= 'custom_field'` alone would drop them (NULL never compares true).
+            $q->whereNull('object_type')->orWhere('object_type', '!=', 'custom_field');
+        })
         ->delete();
 }
 
@@ -524,6 +577,41 @@ function fluentcrm_subscriber_statuses($isOptions = false)
 
     return $formattedStatues;
 
+}
+
+function fluentcrm_subscriber_sms_statuses($isOptions = false)
+{
+    $core_statuses = [
+        'sms_subscribed',
+        'sms_pending',
+        'sms_unsubscribed',
+        'sms_bounced'
+    ];
+
+    $statuses = apply_filters('fluent_crm/contact_sms_statuses', $core_statuses);
+
+    if (!$isOptions) {
+        return $statuses;
+    }
+
+    $formattedStatues = [];
+    $transMaps = [
+        'sms_subscribed'   => __('SMS Subscribed', 'fluent-crm'),
+        'sms_pending'      => __('SMS Pending', 'fluent-crm'),
+        'sms_unsubscribed' => __('SMS Unsubscribed', 'fluent-crm'),
+        'sms_bounced'      => __('SMS Bounced', 'fluent-crm')
+    ];
+
+    foreach ($statuses as $status) {
+        $title = isset($transMaps[$status]) ? $transMaps[$status] : ucwords(str_replace('_', ' ', $status));
+        $formattedStatues[] = [
+            'id'    => $status,
+            'slug'  => $status,
+            'title' => $title
+        ];
+    }
+
+    return $formattedStatues;
 }
 
 /**
@@ -628,21 +716,21 @@ function fluentcrm_activity_types()
      * @param array $types {
      *     An associative array of contact activity types.
      *
-     *     @type string $note              Note activity type.
-     *     @type string $call              Call activity type.
-     *     @type string $email             Email activity type.
-     *     @type string $meeting           Meeting activity type.
-     *     @type string $quote_sent        Quote sent activity type.
-     *     @type string $quote_accepted    Quote accepted activity type.
-     *     @type string $quote_refused     Quote refused activity type.
-     *     @type string $invoice_sent      Invoice sent activity type.
-     *     @type string $invoice_part_paid Invoice part paid activity type.
-     *     @type string $invoice_paid      Invoice paid activity type.
-     *     @type string $invoice_refunded  Invoice refunded activity type.
-     *     @type string $transaction       Transaction activity type.
-     *     @type string $feedback          Feedback activity type.
-     *     @type string $tweet             Tweet activity type.
-     *     @type string $facebook_post     Facebook post activity type.
+     * @type string $note Note activity type.
+     * @type string $call Call activity type.
+     * @type string $email Email activity type.
+     * @type string $meeting Meeting activity type.
+     * @type string $quote_sent Quote sent activity type.
+     * @type string $quote_accepted Quote accepted activity type.
+     * @type string $quote_refused Quote refused activity type.
+     * @type string $invoice_sent Invoice sent activity type.
+     * @type string $invoice_part_paid Invoice part paid activity type.
+     * @type string $invoice_paid Invoice paid activity type.
+     * @type string $invoice_refunded Invoice refunded activity type.
+     * @type string $transaction Transaction activity type.
+     * @type string $feedback Feedback activity type.
+     * @type string $tweet Tweet activity type.
+     * @type string $facebook_post Facebook post activity type.
      * }
      */
     $types = apply_filters('fluent_crm/contact_activity_types', [
@@ -767,7 +855,7 @@ function fluentcrmGravatar($email, $name = '')
     $complianceSettings = \FluentCrm\App\Services\Helper::getComplianceSettings();
 
     $gravatarEnabled = $complianceSettings['enable_gravatar'] == 'yes' ? true : false;
-    $fallbackEnabled =  $complianceSettings['gravatar_fallback'] == 'yes' ? true : false;
+    $fallbackEnabled = $complianceSettings['gravatar_fallback'] == 'yes' ? true : false;
 
     if (!$gravatarEnabled) {
         return apply_filters('fluent_crm/default_avatar', FLUENTCRM_PLUGIN_URL . 'assets/images/avatar.png', $email);
@@ -793,6 +881,36 @@ function fluentcrmGravatar($email, $name = '')
     return apply_filters('fluent_crm/get_avatar',
         "https://www.gravatar.com/avatar/{$hash}?s=128" . $fallback,
         $email
+    );
+}
+
+/**
+ * Get avatar HTML for admin-facing UI and guarantee a safe placeholder.
+ *
+ * WordPress get_avatar() can return false when avatars are disabled, which
+ * breaks consumers that expect markup. In that case we fall back to the
+ * plugin's avatar URL helper and return a simple image tag.
+ *
+ * @param string $email
+ * @param string $name
+ * @param int    $size
+ * @return string
+ */
+function fluentcrmGetAvatarHtml($email, $name = '', $size = 128)
+{
+    $avatarHtml = get_avatar($email, $size);
+
+    if ($avatarHtml) {
+        return $avatarHtml;
+    }
+
+    $avatarUrl = fluentcrmGravatar($email, $name);
+
+    return sprintf(
+        '<img alt="%1$s" src="%2$s" class="avatar avatar-%3$d photo" height="%3$d" width="%3$d" />',
+        esc_attr($name),
+        esc_url($avatarUrl),
+        absint($size)
     );
 }
 
@@ -829,10 +947,18 @@ function fluentcrmHrefParams($content, $params = [])
 
 /**
  * get if click tracking is enabled or disabled
- * @return bool
+ * @return bool|string
  */
 function fluentcrmTrackClicking()
 {
+
+    static $tracking = null;
+
+    if ($tracking !== null) {
+        return $tracking;
+    }
+
+
     /**
      * Determine if click tracking is enabled for FluentCRM Emails.
      *
@@ -840,7 +966,85 @@ function fluentcrmTrackClicking()
      *
      * @return bool True if click tracking is enabled, false otherwise.
      */
-    return apply_filters('fluent_crm/track_click', true);
+    $trackClick = apply_filters('fluent_crm/track_click', true);
+
+    if (!$trackClick) {
+        $tracking = false;
+        return false; // disabled by filter
+    }
+
+    $complianceSettings = \FluentCrm\App\Services\Helper::getComplianceSettings();
+
+    $value = $complianceSettings['email_click_tracking'] ?? 'yes';
+
+    if ($value === 'yes') {
+        $tracking = true;
+        return true;
+    }
+
+    if ($value === 'no') {
+        $tracking = false;
+        return false;
+    }
+
+    if ($value === 'anonymous') {
+        $tracking = 'anonymous';
+        return 'anonymous';
+    }
+
+    return true; // default enabled
+}
+
+
+/**
+ * get if open tracking is enabled or disabled or anonymous
+ * @return bool|string
+ */
+function fluentcrmTrackEmailOpen()
+{
+
+    static $tracking = null;
+
+    if ($tracking !== null) {
+        return $tracking;
+    }
+
+
+    /**
+     * Determine if open tracking is enabled for FluentCRM Emails.
+     *
+     * This filter allows you to enable or disable open tracking in FluentCRM.
+     *
+     * @return bool True if open tracking is disable, true otherwise.
+     */
+    $disableTracking = apply_filters('fluentcrm_disable_email_open_tracking', false);
+
+    if ($disableTracking) {
+        $tracking = false;
+        return false; // disabled by filter
+    }
+
+    $complianceSettings = \FluentCrm\App\Services\Helper::getComplianceSettings();
+
+    $value = $complianceSettings['email_open_tracking'] ?? 'yes';
+
+    if ($value === 'yes') {
+        $tracking = true;
+        return $tracking;
+    }
+
+    if ($value === 'no') {
+        $tracking = false;
+        return $tracking;
+    }
+
+    if ($value === 'anonymous') {
+        $tracking = 'anonymous';
+        return $tracking;
+    }
+
+    $tracking = true; // default enabled
+    return $tracking;
 }
 
 
@@ -1036,7 +1240,25 @@ function fluentcrm_menu_url_base($ext = '')
      * @param string The base URL for the FluentCRM admin menu.
      */
     $url = apply_filters('fluent_crm/menu_url_base', admin_url('admin.php?page=fluentcrm-admin#/'));
-    if($ext) {
+    if ($ext) {
+        $url .= $ext;
+    }
+
+    return $url;
+}
+
+function fluent_crm_menu_url_base_new($ext = '')
+{
+    /**
+     * Define the base URL for the FluentCRM admin menu.
+     *
+     * This filter allows customization of the base URL used in the FluentCRM admin menu.
+     * By default, it points to the FluentCRM admin page within the WordPress admin dashboard.
+     *
+     * @param string The base URL for the FluentCRM admin menu.
+     */
+    $url = apply_filters('fluent_crm/new_menu_url_base', admin_url('admin.php?page=fluent-crm-v3#/'));
+    if ($ext) {
         $url .= $ext;
     }
 
@@ -1085,8 +1307,8 @@ function fluentcrm_get_crm_profile_html($userIdOrEmail, $checkPermission = true,
      *
      * This filter allows modification of the lifetime value of a contact profile.
      *
-     * @param int   $lifeTimeValue The initial lifetime value, default is 0.
-     * @param array $profile       The contact profile data.
+     * @param int $lifeTimeValue The initial lifetime value, default is 0.
+     * @param array $profile The contact profile data.
      *
      * @return int The modified lifetime value.
      */
@@ -1339,9 +1561,12 @@ function fluentcrm_is_rtl()
 }
 
 /**
- * Get FluentCRM Query Builder instance
+ * Get FluentCRM Database Connection instance.
  *
- * @return FluentCrm\Framework\Database\Query\WPDBConnection
+ * Note: ->table()->get() returns \FluentCrm\Framework\Support\Collection (not array).
+ * Use ->isEmpty() instead of !$result to check for empty results.
+ *
+ * @return \FluentCrm\Framework\Database\Query\WPDBConnection
  */
 function fluentCrmDb()
 {
@@ -1350,7 +1575,8 @@ function fluentCrmDb()
 
 function fluentCrmIsMemoryExceeded($percent = 75)
 {
-    $memory_limit = fluentCrmGetMemoryLimit() * ($percent / 100);
+    $memoryLimit = fluentCrmGetMemoryLimit();
+    $memory_limit = $memoryLimit * ($percent / 100);
     $current_memory = memory_get_usage(true);
 
     return $current_memory >= $memory_limit;
@@ -1371,7 +1597,7 @@ function fluentCrmGetMemoryLimit()
         $memory_limit = '128M'; // Sensible default, and minimum required by WooCommerce
     }
 
-    if (!$memory_limit || -1 === $memory_limit || '-1' === $memory_limit) {
+    if (!$memory_limit || -1 === $memory_limit || '-1' === $memory_limit || '-1M' === $memory_limit) {
         // Unlimited, set to 12GB.
         $memory_limit = '12G';
     }
@@ -1394,7 +1620,7 @@ function fluentCrmGetMemoryLimit()
     }
 
     if ($limit < 104857600) {
-        return 104857600;
+        return 104857600 * 2;
     }
 
     return $limit;
@@ -1433,7 +1659,7 @@ function fluentCrmWillAnonymizeIp()
 function fluentCrmGetContactSecureHash($contactId)
 {
     if (!$contactId) {
-        return false;
+        return '';
     }
 
     $exist = SubscriberMeta::where('subscriber_id', $contactId)
@@ -1461,20 +1687,22 @@ function fluentCrmGetContactSecureHash($contactId)
 
 function fluentCrmGetContactManagedHash($contactId)
 {
+    static $cache = [];
+
+    if (isset($cache[$contactId])) {
+        return $cache[$contactId];
+    }
+
     $exist = SubscriberMeta::where('subscriber_id', $contactId)
         ->where('key', '_secure_managed_hash')
         ->first();
 
     if ($exist) {
-        $cutOutTime = time() - 60 * 60 * 24 * 30;
-        if (time() - strtotime($exist->updated_at) > $cutOutTime) {
-            $hash = md5(wp_generate_uuid4() . '_' . $contactId . '_' . '_' . time()) . '__' . $contactId;
-            $exist->value = $hash;
-            $exist->updated_at = gmdate('Y-m-d H:i:s');
-            $exist->save();
-            return $hash;
-        }
-
+        // The managed hash is stable for the life of the contact so that List-Unsubscribe
+        // and manage-subscription links keep resolving however long an email lingers in an
+        // inbox. It is rotated only on an explicit security event — a WordPress password
+        // change (see Cleanup::handleUserPasswordChanged()).
+        $cache[$contactId] = $exist->value;
         return $exist->value;
     }
 
@@ -1488,6 +1716,7 @@ function fluentCrmGetContactManagedHash($contactId)
         'value'         => $hash
     ]);
 
+    $cache[$contactId] = $hash;
     return $hash;
 }
 
@@ -1559,6 +1788,11 @@ function fluentCrmPersistentCache($key, $callback = false, $expire = 600)
 function fluentCrmAutoProcessCampaignTypes()
 {
     return ['campaign', 'recurring_mail'];
+}
+
+function fluentCrmAutoProcessSmsCampaignTypes()
+{
+    return ['campaign'];
 }
 
 function fluentCrmRunTimeCache($key, $value = NULL)

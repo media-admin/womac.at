@@ -6,7 +6,7 @@ use FluentCrm\App\Models\Subscriber;
 use FluentCrm\App\Services\Helper;
 use FluentCrm\App\Services\Sanitize;
 use FluentCrm\Framework\Support\Arr;
-use FluentCrm\Framework\Request\Request;
+use FluentCrm\Framework\Http\Request\Request;
 
 /**
  *  UsersController - REST API Handler Class
@@ -21,14 +21,23 @@ class UsersController extends Controller
 {
     /**
      * Get all the users.
-     * @param \FluentCrm\Framework\Request\Request $request
+     * @param \FluentCrm\Framework\Http\Request\Request $request
      * @return \WP_REST_Response
      */
     public function index(Request $request)
     {
-        $roles = $request->getSafe('roles', []);
+        $roles = $request->getSafe('roles', 'sanitize_text_field', []);
         $limit = $request->limit ?: 5;
-        $fields = $request->fields ?: ['ID', 'display_name', 'user_email'];
+
+        // Never trust client-supplied `fields`: WP_User_Query would otherwise expose
+        // sensitive columns (e.g. user_pass, user_activation_key). Intersect the request
+        // against a non-sensitive allowlist and fall back to the safe default set.
+        $allowedFields = ['ID', 'display_name', 'user_email', 'user_login', 'user_nicename'];
+        $fields = array_values(array_intersect((array) ($request->fields ?: []), $allowedFields));
+
+        if (empty($fields)) {
+            $fields = ['ID', 'display_name', 'user_email'];
+        }
 
         $userQuery = new \WP_User_Query([
             'role__in' => $roles,
@@ -64,7 +73,7 @@ class UsersController extends Controller
         $page = absint($request->get('page', 1));
 
         $userQuery = new \WP_User_Query([
-            'role__in' => $inputs['roles'],
+            'role__in' => Arr::get($inputs, 'roles', []),
             'number'   => $limit,
             'offset'   => ($page - 1) * $limit
         ]);
@@ -109,10 +118,10 @@ class UsersController extends Controller
 
         return Subscriber::import(
             $subscribers,
-            $inputs['tags'],
-            $inputs['lists'],
-            $inputs['update'],
-            $inputs['new_status'],
+            Arr::get($inputs, 'tags', []),
+            Arr::get($inputs, 'lists', []),
+            Arr::get($inputs, 'update'),
+            Arr::get($inputs, 'new_status'),
             $sendDoubleOptin
         );
     }

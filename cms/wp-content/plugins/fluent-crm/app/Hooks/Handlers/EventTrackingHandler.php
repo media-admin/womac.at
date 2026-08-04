@@ -58,11 +58,15 @@ class EventTrackingHandler
     public function applyEventTrackingFilter($query, $filters)
     {
         if (!Helper::isExperimentalEnabled('event_tracking')) {
+            // Fail closed: with event tracking switched off a saved "did event X" segment
+            // must match nobody. Returning the query unchanged would silently turn it
+            // into "all subscribers" for list views and campaign sends.
+            $query->whereRaw('1 = 0');
             return $query;
         }
 
         foreach ($filters as $filter) {
-            if (empty($filter['value']) && $filter['value'] === '') {
+            if (!array_key_exists('value', $filter) || $filter['value'] === '') {
                 continue;
             }
 
@@ -98,11 +102,13 @@ class EventTrackingHandler
                     });
                 } else if ($operator == 'contains') {
                     $query->whereHas($relation, function ($q) use ($filter) {
-                        $q->where('title', 'LIKE', '%' . $filter['value'] . '%');
+                        global $wpdb;
+                        $q->where('title', 'LIKE', '%' . $wpdb->esc_like($filter['value']) . '%');
                     });
                 } else if ($operator == 'not_contains') {
                     $query->whereDoesntHave($relation, function ($q) use ($filter) {
-                        $q->where('title', 'LIKE', '%' . $filter['value'] . '%');
+                        global $wpdb;
+                        $q->where('title', 'LIKE', '%' . $wpdb->esc_like($filter['value']) . '%');
                     });
                 }
                 continue;
@@ -135,12 +141,14 @@ class EventTrackingHandler
                     });
                 } else if ($operator == 'contains') {
                     $query->whereHas($relation, function ($q) use ($filter, $eventKey) {
-                        $q->where('value', 'LIKE', '%' . $filter['value'] . '%')
+                        global $wpdb;
+                        $q->where('value', 'LIKE', '%' . $wpdb->esc_like($filter['value']) . '%')
                             ->where('event_key', $eventKey);
                     });
                 } else if ($operator == 'not_contains') {
                     $query->whereDoesntHave($relation, function ($q) use ($filter, $eventKey) {
-                        $q->where('value', 'LIKE', '%' . $filter['value'] . '%')
+                        global $wpdb;
+                        $q->where('value', 'LIKE', '%' . $wpdb->esc_like($filter['value']) . '%')
                             ->where('event_key', $eventKey);
                     });
                 }
@@ -200,15 +208,17 @@ class EventTrackingHandler
             return $widgets;
         }
 
-        $html = '<div class="fc_scrolled_lists"><ul class="fc_full_listed fc_event_tracking_lists">';
+        $html = '<div class="fc_scrolled_lists"><ul class="fcrm_event_tracking_lists">';
         foreach ($events as $event) {
             $html .= '<li>';
-            $html .= '<div class="el-badge"><p class="fc_type">' . esc_attr($event->event_key) . '</p><sup class="el-badge__content is-fixed">' . $event->counter . '</sup></div>';
-            $html .= '<p class="fl_event_title"><b>' . esc_html($event->title) . '</b></p>';
+            $html .= '<p class="fcrm_event_tracking_title">' . esc_html($event->title) . '</p>';
             if ($event->value) {
-                $html .= '<p class="fc_value">' . wp_kses_post($event->value) . '</p>';
+                $html .= '<p class="fcrm_event_tracking_value">' . wp_kses_post($event->value) . '</p>';
             }
-            $html .= '<span class="fc_date">' . $event->updated_at . '</span>';
+            $html .= '<div class="fcrm_event_tracking_footer">';
+            $html .= '<div class="fcrm_event_tracking_badge">' . esc_attr($event->event_key) . '<span class="fcrm_event_tracking_count">(' . esc_html($event->counter) . ')</span></div>';
+            $html .= '<span class="fcrm_event_tracking_date">' . $event->updated_at . '</span>';
+            $html .= '</div>';
             $html .= '</li>';
         }
         $html .= '</ul></div>';
@@ -302,25 +312,25 @@ class EventTrackingHandler
                 ],
                 'creatable'          => true,
                 'experimental_cache' => true,
-                'help'               => 'Match one or more tracking events for your contacts.'
+                'help'               => __('Match one or more tracking events for your contacts.', 'fluent-crm')
             ],
             [
                 'label'            => __('Event Occurrence Count', 'fluent-crm'),
                 'value'            => 'event_tracking_key_count',
                 'type'             => 'composite_optioned_compare',
-                'help'             => 'The provided value for your selected event will be matched with the event occurrence count',
+                'help'             => __('The provided value for your selected event will be matched with the event occurrence count', 'fluent-crm'),
                 'ajax_selector'    => [
-                    'label'              => 'For Event Key',
+                    'label'              => __('For Event Key', 'fluent-crm'),
                     'option_key'         => 'event_tracking_keys',
                     'experimental_cache' => true,
                     'is_multiple'        => false,
-                    'placeholder'        => 'Select Event Key'
+                    'placeholder'        => __('Select Event Key', 'fluent-crm')
                 ],
                 'value_config'     => [
-                    'label'       => 'Event Count',
+                    'label'       => __('Event Count', 'fluent-crm'),
                     'type'        => 'input_text',
                     'data_type'   => 'number',
-                    'placeholder' => 'Event Value'
+                    'placeholder' => __('Event Value', 'fluent-crm')
                 ],
                 'custom_operators' => [
                     '='  => 'equal',
@@ -333,25 +343,25 @@ class EventTrackingHandler
                 'label'            => __('Event Value', 'fluent-crm'),
                 'value'            => 'event_tracking_value',
                 'type'             => 'composite_optioned_compare',
-                'help'             => 'The compare value will be matched with selected event & last recorded value of the selected event key',
+                'help'             => __('The compare value will be matched with selected event & last recorded value of the selected event key', 'fluent-crm'),
                 'ajax_selector'    => [
-                    'label'              => 'For Event Key',
+                    'label'              => __('For Event Key', 'fluent-crm'),
                     'option_key'         => 'event_tracking_keys',
                     'experimental_cache' => true,
                     'is_multiple'        => false,
-                    'placeholder'        => 'Select Event Key'
+                    'placeholder'        => __('Select Event Key', 'fluent-crm')
                 ],
                 'value_config'     => [
-                    'label'       => 'Compare Value',
+                    'label'       => __('Compare Value', 'fluent-crm'),
                     'type'        => 'input_text',
-                    'placeholder' => 'Event Value',
+                    'placeholder' => __('Event Value', 'fluent-crm'),
                     'data_type'   => 'number',
                 ],
                 'custom_operators' => [
                     '='            => 'equal',
                     '!='           => 'not equal',
                     'contains'     => 'includes',
-                    'not_contains' => 'does not includes',
+                    'not_contains' => 'does not include',
                     '>'            => 'greater than',
                     '<'            => 'less than'
                 ],
@@ -360,7 +370,7 @@ class EventTrackingHandler
                 'label' => __('Event Title', 'fluent-crm'),
                 'value' => 'event_tracking_title',
                 'type'  => 'text',
-                'help'  => 'Match by tracking event title'
+                'help'  => __('Match by tracking event title', 'fluent-crm')
             ],
         ];
     }

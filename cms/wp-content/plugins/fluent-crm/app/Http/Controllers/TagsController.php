@@ -5,7 +5,7 @@ namespace FluentCrm\App\Http\Controllers;
 use FluentCrm\App\Models\Tag;
 use FluentCrm\App\Services\Helper;
 use FluentCrm\Framework\Support\Arr;
-use FluentCrm\Framework\Request\Request;
+use FluentCrm\Framework\Http\Request\Request;
 
 /**
  *  TagsController - REST API Handler Class
@@ -20,14 +20,14 @@ class TagsController extends Controller
 {
     /**
      * Get all of the tags
-     * @param \FluentCrm\Framework\Request\Request $request
+     * @param \FluentCrm\Framework\Http\Request\Request $request
      * @return \WP_REST_Response | array
      */
     public function index(Request $request)
     {
         $order = [
-            'by'    => $request->getSafe('sort_by', 'id', 'sanitize_sql_orderby'),
-            'order' => $request->getSafe('sort_order', 'DESC', 'sanitize_sql_orderby')
+            'by'    => $request->getSafe('sort_by', 'sanitize_sql_orderby', 'id'),
+            'order' => $request->getSafe('sort_order', 'sanitize_sql_orderby', 'DESC')
         ];
 
         $tags = Tag::orderBy($order['by'], $order['order'])
@@ -35,8 +35,34 @@ class TagsController extends Controller
             ->paginate();
 
         if (!$request->get('exclude_counts')) {
+            // One grouped pivot-join count for the whole page instead of a
+            // JOIN + COUNT query per tag.
+            $tagIds = [];
             foreach ($tags as $tag) {
-                $tag->subscribersCount = $tag->countByStatus('subscribed');
+                $tagIds[] = $tag->id;
+            }
+
+            $counts = [];
+            if ($tagIds) {
+                $countRows = fluentCrmDb()->table('fc_subscriber_pivot')
+                    ->where('fc_subscriber_pivot.object_type', 'FluentCrm\App\Models\Tag')
+                    ->whereIn('fc_subscriber_pivot.object_id', $tagIds)
+                    ->join('fc_subscribers', 'fc_subscribers.id', '=', 'fc_subscriber_pivot.subscriber_id')
+                    ->where('fc_subscribers.status', 'subscribed')
+                    ->groupBy('fc_subscriber_pivot.object_id')
+                    ->select([
+                        'fc_subscriber_pivot.object_id',
+                        fluentCrmDb()->raw('COUNT(*) as total')
+                    ])
+                    ->get();
+
+                foreach ($countRows as $countRow) {
+                    $counts[$countRow->object_id] = (int)$countRow->total;
+                }
+            }
+
+            foreach ($tags as $tag) {
+                $tag->subscribersCount = isset($counts[$tag->id]) ? $counts[$tag->id] : 0;
             }
         }
 
@@ -49,9 +75,10 @@ class TagsController extends Controller
             $formattedTags = [];
             foreach ($allTags as $tag) {
                 $formattedTags[] = [
-                    'id'    => strval($tag->id),
-                    'title' => $tag->title,
-                    'slug'  => $tag->slug
+                    'id'          => strval($tag->id),
+                    'title'       => $tag->title,
+                    'slug'        => $tag->slug,
+                    'description' => $tag->description
                 ];
             }
             $data['all_tags'] = $formattedTags;
@@ -72,7 +99,7 @@ class TagsController extends Controller
 
     /**
      * Store a tag.
-     * @param \FluentCrm\Framework\Request\Request $request
+     * @param \FluentCrm\Framework\Http\Request\Request $request
      * @return \WP_REST_Response
      */
     public function create(Request $request)
@@ -109,7 +136,7 @@ class TagsController extends Controller
 
     /**
      * Store a tag.
-     * @param \FluentCrm\Framework\Request\Request $request
+     * @param \FluentCrm\Framework\Http\Request\Request $request
      * @param $id int Tag ID
      * @return \WP_REST_Response
      */
@@ -128,7 +155,7 @@ class TagsController extends Controller
             $tag = Tag::where('slug', $allData['slug'])->first();
             if (!$tag) {
                 return $this->sendError([
-                    'message' => 'Tag could not be found'
+                    'message' => __('Tag could not be found', 'fluent-crm')
                 ]);
             }
             $id = $tag->id;
@@ -141,7 +168,7 @@ class TagsController extends Controller
 
         if (Tag::where('slug', $allData['slug'])->where('id', '!=', $id)->first()) {
             return $this->sendError([
-                'message' => 'Provided slug already exist in another tag'
+                'message' => __('Provided slug already exists in another tag', 'fluent-crm')
             ]);
         }
 
@@ -209,13 +236,21 @@ class TagsController extends Controller
     /**
      * Delete a tag by id
      *
-     * @param \FluentCrm\Framework\Request\Request $request
+     * @param \FluentCrm\Framework\Http\Request\Request $request
      * @param $tagId
      * @return \WP_REST_Response $object
      */
     public function remove(Request $request, $tagId)
     {
-        Tag::find($tagId)->delete();
+        $tag = Tag::find($tagId);
+
+        if (!$tag) {
+            return $this->sendError([
+                'message' => __('Tag not found', 'fluent-crm')
+            ], 404);
+        }
+
+        $tag->delete();
 
         do_action('fluentcrm_tag_deleted', $tagId);
         do_action('fluent_crm/tag_deleted', $tagId);
@@ -228,9 +263,9 @@ class TagsController extends Controller
 
     public function handleBulkAction(Request $request)
     {
-        $tagIds = $request->getSafe('tagIds', [], 'intval');
+        $tagIds = array_map('intval', (array)$request->get('tagIds', []));
 
-        $tagIds = array_filter($tagIds);
+        $tagIds = array_unique(array_filter($tagIds));
 
         if ($tagIds) {
             foreach ($tagIds as $tagId) {
@@ -242,7 +277,7 @@ class TagsController extends Controller
         }
 
         return $this->sendSuccess([
-            'message' => __('Selected Tags has been removed permanently', 'fluent-crm'),
+            'message' => __('Selected Tags have been removed permanently', 'fluent-crm'),
         ]);
 
     }

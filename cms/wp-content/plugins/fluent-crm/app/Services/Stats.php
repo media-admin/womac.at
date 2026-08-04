@@ -13,52 +13,51 @@ class Stats
 {
     public function getCounts()
     {
+        // These COUNT(*)s scan millions of rows on large sites and the dashboard runs
+        // them on every load — cache the raw numbers for 5 minutes. Titles/routes are
+        // built per-request so translations always match the viewer's locale.
+        $counts = fluentCrmGetFromCache('dashboard_stat_counts', function () {
+            return [
+                'total_subscribers' => Subscriber::where('status', 'subscribed')->count(),
+                'total_campaigns'   => Campaign::count(),
+                'email_sent'        => CampaignEmail::where('status', 'sent')->count(),
+                'total_automations' => Funnel::where('status', 'published')->count(),
+                'email_pending'     => CampaignEmail::whereIn('status', ['pending', 'scheduled', 'processing'])->count()
+            ];
+        }, 300);
+
         $data = [
             'total_subscribers' => [
                 'title' => __('Active Contacts', 'fluent-crm'),
-                'count' => Subscriber::where('status', 'subscribed')->count(),
+                'count' => $counts['total_subscribers'],
                 'route' => [
                     'name' => 'subscribers'
                 ]
             ],
             'total_campaigns'   => [
                 'title' => __('Campaigns', 'fluent-crm'),
-                'count' => Campaign::count(),
+                'count' => $counts['total_campaigns'],
                 'route' => [
                     'name' => 'campaigns'
                 ]
             ],
             'email_sent'        => [
                 'title' => __('Emails Sent', 'fluent-crm'),
-                'count' => CampaignEmail::where('status', 'sent')->count(),
+                'count' => $counts['email_sent'],
                 'route' => [
                     'name' => 'all_emails'
                 ]
             ],
-            'tags'              => [
-                'title' => __('Tags', 'fluent-crm'),
-                'count' => Tag::count(),
-                'route' => [
-                    'name' => 'tags'
-                ]
-            ],
-            'total_templates'   => [
-                'title' => __('Email Templates', 'fluent-crm'),
-                'count' => Template::where('post_type', fluentcrmTemplateCPTSlug())->count(),
-                'route' => [
-                    'name' => 'templates'
-                ]
-            ],
             'total_automations'   => [
                 'title' => __('Active Automations', 'fluent-crm'),
-                'count' => Funnel::where('status', 'published')->count(),
+                'count' => $counts['total_automations'],
                 'route' => [
                     'name' => 'funnels'
                 ]
             ]
         ];
 
-        $pendingEmails = CampaignEmail::whereIn('status', ['pending', 'scheduled', 'processing'])->count();
+        $pendingEmails = $counts['email_pending'];
 
         if ($pendingEmails) {
             $data['email_pending'] = [
@@ -90,27 +89,32 @@ class Stats
             [
                 'title' => __('Contact Segments', 'fluent-crm'),
                 'url'   => $urlBase . 'contact-groups/lists',
-                'icon'  => 'el-icon-folder'
+                'icon'  => 'ContactSegments'
             ],
             [
                 'title' => __('Recurring Campaigns', 'fluent-crm'),
                 'url'   => $urlBase . 'email/recurring-campaigns',
-                'icon'  => 'el-icon-message'
+                'icon'  => 'RecurringCampaigns'
             ],
             [
                 'title' => __('Email Sequences', 'fluent-crm'),
                 'url'   => $urlBase . 'email/sequences',
-                'icon'  => 'el-icon-alarm-clock'
+                'icon'  => 'EmailSequences'
+            ],
+            [
+                'title' => __('MCP for AI Agents', 'fluent-crm'),
+                'url'   => $urlBase . 'settings/mcp_settings',
+                'icon'  => 'el-icon-connection'
             ],
             [
                 'title' => __('Documentations', 'fluent-crm'),
                 'url'   =>  $urlBase . 'documentation',
-                'icon'  => 'el-icon-document'
+                'icon'  => 'Documentations'
             ],
             [
                 'title' => __('Video Tutorials (Free)', 'fluent-crm'),
                 'url' => 'https://www.youtube.com/playlist?list=PLXpD0vT4thWG-ZPeM6cco7BS5cJY9bTjL',
-                'icon' => 'el-icon-video-camera',
+                'icon' => 'VideoTutorials',
                 'is_external' => true
             ]
         ];
@@ -129,9 +133,6 @@ class Stats
 
     public function getOnboardingStat()
     {
-        if (fluentcrm_get_option('onboarding_status') == 'yes') {
-            return null;
-        }
 
         $formCreated = false;
         if(defined('FLUENTFORM')) {
@@ -142,6 +143,10 @@ class Stats
             if(!$formCreated) {
                 $formCreated = !!Funnel::where('trigger_name', 'fluentform_submission_inserted')->first();
             }
+        }
+
+        if (fluentcrm_get_option('onboarding_status') == 'yes' && $formCreated) {
+            return null;
         }
 
         $boardingSteps = [
@@ -201,5 +206,35 @@ class Stats
             'completed' => $completed,
             'steps'     => $boardingSteps
         ];
+    }
+
+    public function getRecentContacts($limit = 5)
+    {
+        return Subscriber::where('status', 'subscribed')
+            ->orderBy('created_at', 'DESC')
+            ->limit($limit)
+            ->get();
+    }
+
+    public function getActiveAutomations($limit = 5)
+    {
+        return Funnel::where('status', 'published')
+            ->orderBy('created_at', 'DESC')
+            ->limit($limit)
+            ->get();
+    }
+
+    public function getRecentCampaigns($limit = 5)
+    {
+        $campaigns = Campaign::where('status', 'archived')
+            ->orderBy('created_at', 'DESC')
+            ->limit($limit)
+            ->get();
+
+        foreach ($campaigns as $campaign) {
+            $campaign->stats = $campaign->stats();
+        }
+
+        return $campaigns;
     }
 }

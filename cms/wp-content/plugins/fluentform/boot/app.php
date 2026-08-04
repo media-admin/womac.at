@@ -29,6 +29,8 @@ return function ($file) {
                 add_action('fluentform/after_form_menu', $renderNotice);
             });
         }
+
+        fluentform_maybe_disable_contaminated_pro();
     });
 
     $app = new Application($file);
@@ -97,10 +99,12 @@ return function ($file) {
     (new FluentConversational)->boot();
     (new FormsMigrator())->boot();
     
-    /* Plugin Meta Links */
-    
-    add_filter('plugin_row_meta', 'fluentform_plugin_row_meta', 10, 2);
-    
+    /* Plugin Meta Links — registered on init to avoid early textdomain loading (WP 6.7+) */
+
+    add_action('init', function () {
+        add_filter('plugin_row_meta', 'fluentform_plugin_row_meta', 10, 2);
+    });
+
     function fluentform_plugin_row_meta($links, $file)
     {
         if ('fluentform/fluentform.php' == $file) {
@@ -110,7 +114,7 @@ return function ($file) {
                 'developer_docs' => '<a rel="noopener" href="https://developers.fluentforms.com" style="color: #197efb;font-weight: 600;" aria-label="' . esc_attr__('Developer Docs', 'fluentform') . '" target="_blank">' . esc_html__('Developer Docs', 'fluentform') . '</a>',
             ];
             if (!defined('FLUENTFORMPRO')) {
-                $row_meta['pro'] = '<a rel="noopener" href="https://fluentforms.com" style="color: #7742e6;font-weight: bold;" aria-label="' . esc_attr__('Upgrade to Pro', 'fluentform') . '" target="_blank">' . esc_html__('Upgrade to Pro', 'fluentform') . '</a>';
+                $row_meta['pro'] = '<a rel="noopener" href="' . esc_url(fluentform_upgrade_url('plugin_row_meta')) . '" style="color: #7742e6;font-weight: bold;" aria-label="' . esc_attr__('Upgrade to Pro', 'fluentform') . '" target="_blank">' . esc_html__('Upgrade to Pro', 'fluentform') . '</a>';
             }
             return array_merge($links, $row_meta);
         }

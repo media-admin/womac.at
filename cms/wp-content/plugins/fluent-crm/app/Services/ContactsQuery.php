@@ -3,6 +3,7 @@
 namespace FluentCrm\App\Services;
 
 use FluentCrm\App\Models\Subscriber;
+use FluentCrm\App\Models\SubscriberMeta;
 use FluentCrm\Framework\Support\Arr;
 
 class ContactsQuery
@@ -24,12 +25,16 @@ class ContactsQuery
             'tags'               => [],
             'lists'              => [],
             'statuses'           => [],
+            'sms_statuses'           => [],
             'has_commerce'       => false,
             'custom_fields'      => false,
             'limit'              => false,
             'offset'             => false,
             'contact_status'     => '',
-            'company_ids'        => []
+            'contact_type'       => '',
+            'company_ids'        => [],
+            'contact_ids'        => [],
+            'emails'             => []
         ]);
 
         $this->setupQuery();
@@ -47,7 +52,22 @@ class ContactsQuery
         }
 
         if ($shortBy = $this->args['sort_by']) {
-            if (in_array($shortBy, (new Subscriber())->getFillable()) || $shortBy == 'id') {
+            // Allowlist of every real fc_subscribers column. The framework
+            // rewrite (May 2025) made orderBy() throw LogicException for
+            // names that don't match ^[a-zA-Z0-9_\.]+$, and unknown columns
+            // would produce SQL errors — so the check has to happen before
+            // we hand the value to the builder. getFillable() used to be
+            // the gate but it omits id, contact_owner and a few others,
+            // so legitimate sorts (e.g., contact_owner) silently dropped.
+            $allowedSortBy = [
+                'id', 'user_id', 'hash', 'contact_owner', 'company_id', 'prefix',
+                'first_name', 'last_name', 'email', 'timezone', 'address_line_1',
+                'address_line_2', 'postal_code', 'city', 'state', 'country', 'ip',
+                'latitude', 'longitude', 'total_points', 'life_time_value', 'phone',
+                'status', 'contact_type', 'source', 'avatar', 'date_of_birth',
+                'created_at', 'last_activity', 'updated_at',
+            ];
+            if (in_array($shortBy, $allowedSortBy, true)) {
                 $subscribersQuery->orderBy($shortBy, $this->args['sort_type']);
             }
         }
@@ -63,7 +83,22 @@ class ContactsQuery
                     }
 
                     $subscribersQueryGroup->{$method}(function ($q) use ($group) {
+                        // Fail closed: a group whose constraints cannot be applied must match
+                        // NOTHING. Constraints are added by action hooks, so a provider with no
+                        // registered handler (Pro deactivated, license lapsed, feature toggled
+                        // off) would otherwise add zero WHERE clauses and silently degrade the
+                        // group to "match every subscriber" — the worst possible blast radius
+                        // for a campaign send.
+                        if (!$group) {
+                            $q->whereRaw('1 = 0');
+                            return;
+                        }
+
                         foreach ($group as $providerName => $items) {
+                            if (!has_action('fluentcrm_contacts_filter_' . $providerName)) {
+                                $q->whereRaw('1 = 0');
+                                continue;
+                            }
                             do_action_ref_array('fluentcrm_contacts_filter_' . $providerName, [&$q, $items]);
                         }
                     });
@@ -87,6 +122,15 @@ class ContactsQuery
                 $statuses = array_intersect($statuses, fluentcrm_subscriber_statuses());
 
                 $subscribersQuery->filterByStatues($statuses);
+            }
+
+            if ($sms_statuses = $this->args['sms_statuses']) {
+                $sms_statuses = (array) $sms_statuses;
+                $subscribersQuery->where(function ($query) use ($sms_statuses) {
+                    foreach ($sms_statuses as $sms_status) {
+                        $query->orWhere('sms_status', $sms_status);
+                    }
+                });
             }
         }
 
@@ -112,8 +156,27 @@ class ContactsQuery
             $subscribersQuery->where('status', $this->args['contact_status']);
         }
 
+        // Plain column filter, applied outside the simple/advanced branch so it
+        // composes with either — callers may pass it alongside tags/lists or
+        // alongside advanced filter groups.
+        if ($this->args['contact_type']) {
+            $subscribersQuery->where('contact_type', $this->args['contact_type']);
+        }
+
         if ($this->args['company_ids']) {
             $subscribersQuery->filterByCompanies($this->args['company_ids']);
+        }
+
+        if ($this->args['contact_ids'] && is_array($this->args['contact_ids']) && !empty($this->args['contact_ids'])) {
+            $subscribersQuery->whereIn('id', $this->args['contact_ids']);
+        }
+
+        // Direct address lookup — "give me the contacts for these emails".
+        // Applied outside the simple/advanced branch (same as contact_ids), so
+        // it narrows either branch rather than replacing it. Matching follows
+        // the column collation, which is case-insensitive by default.
+        if ($this->args['emails'] && is_array($this->args['emails'])) {
+            $subscribersQuery->whereIn('email', $this->args['emails']);
         }
 
         $this->model = $subscribersQuery;
@@ -147,9 +210,36 @@ class ContactsQuery
     private function returnSubscribers($subscribers)
     {
         if ($this->args['custom_fields']) {
-            // we have to include custom fields
+            // One meta query for the whole page — the per-subscriber
+            // $subscriber->custom_fields() call is an N+1 (one query per row).
+            $customFields = fluentcrm_get_custom_contact_fields();
+
+            $keys = [];
+            if ($customFields && is_array($customFields)) {
+                $keys = array_map(function ($item) {
+                    return $item['slug'];
+                }, $customFields);
+            }
+
+            $subscriberIds = [];
             foreach ($subscribers as $subscriber) {
-                $subscriber->custom_fields = $subscriber->custom_fields();
+                $subscriberIds[] = $subscriber->id;
+            }
+
+            $valuesBySubscriber = [];
+            if ($keys && $subscriberIds) {
+                $metaRows = SubscriberMeta::where('object_type', 'custom_field')
+                    ->whereIn('subscriber_id', $subscriberIds)
+                    ->whereIn('key', $keys)
+                    ->get();
+
+                foreach ($metaRows as $metaRow) {
+                    $valuesBySubscriber[$metaRow->subscriber_id][$metaRow->key] = apply_filters('fluent_crm/modify_custom_field_value', $metaRow->value);
+                }
+            }
+
+            foreach ($subscribers as $subscriber) {
+                $subscriber->custom_fields = isset($valuesBySubscriber[$subscriber->id]) ? $valuesBySubscriber[$subscriber->id] : [];
             }
         }
 
@@ -181,9 +271,9 @@ class ContactsQuery
                 }
 
                 $group[$provider][] = [
-                    'property' => $property,
-                    'operator' => $filterItem['operator'],
-                    'value'    => $filterItem['value'],
+                    'property'    => $property,
+                    'operator'    => $filterItem['operator'],
+                    'value'       => Arr::get($filterItem, 'value', ''),
                     'extra_value' => Arr::get($filterItem, 'extra_value')
                 ];
             }

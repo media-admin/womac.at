@@ -393,7 +393,7 @@ class StripeListener
         $data = [
             'subscription_id' => $subscription->id,
             'form_id' => $subscription->form_id,
-            'transaction_hash' => md5('subscription_trans_'.wp_generate_uuid4().time()),
+            'transaction_hash' => wp_generate_password(32, false),
             'user_id' => $submission->user_id,
             'submission_id' => $submission->id,
             'transaction_type' => 'subscription',

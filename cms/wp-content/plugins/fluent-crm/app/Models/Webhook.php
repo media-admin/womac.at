@@ -29,7 +29,10 @@ class Webhook extends Meta
         parent::boot();
 
         static::addGlobalScope('type', function ($builder) {
-            $builder->where('object_type', '=', 'webhook');
+            $builder->where(function($query) {
+                $query->where('object_type', '=', 'webhook')
+                      ->orWhere('object_type', 'LIKE', 'webhook_%');
+            });
         });
     }
 
@@ -70,11 +73,18 @@ class Webhook extends Meta
 
     public function store($data)
     {
+        $key = wp_generate_uuid4();
+        $webhookUrl = add_query_arg([
+            FLUENTCRM_EXTERNAL_URL_PARAM => 1,
+            'route'                      => 'contact',
+            'hash'                       => $key
+        ], site_url('/'));
+
         return static::create([
             'object_type' => 'webhook',
-            'key' => $key = wp_generate_uuid4(),
-            'value' => array_merge($data, [
-                'url' => site_url("?fluentcrm=1&route=contact&hash={$key}")
+            'key'         => $key,
+            'value'       => array_merge($data, [
+                'url' => $webhookUrl
             ]),
         ]);
     }

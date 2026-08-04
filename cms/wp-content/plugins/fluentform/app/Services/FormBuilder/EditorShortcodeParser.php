@@ -168,16 +168,12 @@ class EditorShortcodeParser
         $exploded = explode('.', $value);
         $param = array_pop($exploded);
         $value = wpFluentForm('request')->get($param);
-        
-        if (!$value) {
+
+        if (null === $value || '' === $value) {
             return '';
         }
-        
-        if (is_array($value)) {
-            return esc_attr(implode(', ', $value));
-        }
-        
-        return esc_attr($value);
+
+        return esc_attr(Helper::flattenRequestValue($value));
     }
     
     /**

@@ -76,13 +76,26 @@ class FunnelProcessor
             if (!$subscriber) {
                 return false;
             }
+        } elseif (Arr::get($subscriberData, 'status') === 'pending' && !in_array($subscriber->status, ['subscribed', 'pending'])) {
+            // This trigger runs the double opt-in flow and the contact just took the
+            // triggering action, so whatever their current status (unsubscribed,
+            // bounced, …) they re-enter the opt-in pipeline as 'pending' — that status
+            // decision belongs to this flow, and ONLY the confirmation click makes them
+            // 'subscribed'. updateStatus() (not a raw save) so transition hooks fire.
+            $subscriber->updateStatus('pending');
         }
 
         if ($subscriber->status == 'pending') {
+            // The opt-in email itself is strictly gated on 'pending' (and throttled).
             $subscriber->sendDoubleOptinEmail();
         }
 
         $args = [
+            // 'pending' parks the funnel row until the contact confirms (resumed via the
+            // fluentcrm_subscriber_status_to_subscribed hook); 'draft' enters it for
+            // processing. Suppressed contacts on normal (non-opt-in) triggers enter as
+            // 'draft' so non-email actions (tagging, notifications) still run — the
+            // send-time sendable-status guard blocks any actual email to them.
             'status' => ($subscriber->status == 'pending' || $subscriber->status == 'unsubscribed') ? 'pending' : 'draft'
         ];
 
@@ -90,11 +103,17 @@ class FunnelProcessor
             $args = wp_parse_args($args, $funnelSubArgs);
         }
 
-        (new FunnelProcessor())->startSequences($subscriber, $funnel, $args);
+        $this->startSequences($subscriber, $funnel, $args);
     }
 
     public function startSequences($subscriber, $funnel, $funnelSubArgs = [])
     {
+        // Check if already in funnel to prevent duplicate entries
+        $existing = FunnelHelper::ifAlreadyInFunnel($funnel->id, $subscriber->id);
+        if ($existing) {
+            return;
+        }
+
         $data = [
             'funnel_id'     => $funnel->id,
             'subscriber_id' => $subscriber->id,
@@ -107,8 +126,12 @@ class FunnelProcessor
 
         $data['status'] = FunnelHelper::getFunnelSubscriberStatus($data['status'], $funnel, $subscriber);
 
-        // let's create an empty sequence_subscriber
-        $funnelSubscriber = FunnelSubscriber::create($data);
+        // Unique index on (funnel_id, subscriber_id) prevents duplicates at DB level
+        try {
+            $funnelSubscriber = FunnelSubscriber::create($data);
+        } catch (\Exception $e) {
+            return;
+        }
 
         $sequencePoints = (new SequencePoints($funnel, $funnelSubscriber));
 
@@ -131,24 +154,49 @@ class FunnelProcessor
             return;
         }
 
-        $hasEnd = $sequencePoints->hasEndSequence;
-
-        if ($hasEnd) {
-            foreach ($sequencePoints->getCurrentSequences() as $sequence) {
-                $this->processSequence($subscriber, $sequence, $funnelSubscriber->id);
-                if ($sequence->action_name == 'end_this_funnel') {
-                    $this->completeFunnelSequence($funnelSubscriber);
-                    $this->setFunnel($funnelSubscriber->funnel_id);
-                    return;
-                }
+        // Execute immediate sequences first (they may include conditionals
+        // that set their own next state via initChildSequences)
+        $hasConditional = false;
+        foreach ($sequencePoints->getCurrentSequences() as $sequence) {
+            if ($sequence->type == 'conditional') {
+                $hasConditional = true;
             }
+            $this->processSequence($subscriber, $sequence, $funnelSubscriber->id);
+            if ($sequence->action_name == 'end_this_funnel') {
+                $this->completeFunnelSequence($funnelSubscriber);
+                $this->setFunnel($funnelSubscriber->funnel_id);
+                return;
+            }
+        }
 
-            $this->completeFunnelSequence($funnelSubscriber);
+        // If a conditional was processed, initChildSequences() already
+        // handled the subscriber's next state — skip status update
+        if ($hasConditional) {
+            /*
+             * The conditional's handler is Pro-only and may be absent (Pro deactivated,
+             * step imported into a free install) or may have thrown (swallowed in
+             * processSequence). In that case the row is left status=active with a NULL
+             * next_execution_time — invisible to the cron query forever. Verify a real
+             * transition happened; if not, schedule the row so the engine advances past
+             * the conditional block (last_sequence_id already points at it) on the next
+             * tick instead of stranding the subscriber.
+             */
+            $freshSubscriber = FunnelSubscriber::where('id', $funnelSubscriber->id)->first();
+            if ($freshSubscriber && $freshSubscriber->status == 'active' && !$freshSubscriber->next_execution_time) {
+                Helper::debugLog(
+                    'Conditional step did not transition funnel subscriber ' . $funnelSubscriber->id . ' (funnel ' . $funnelSubscriber->funnel_id . ')',
+                    'Handler missing or failed — subscriber scheduled to advance past the conditional block'
+                );
+
+                FunnelSubscriber::where('id', $freshSubscriber->id)
+                    ->update([
+                        'next_execution_time' => current_time('mysql')
+                    ]);
+            }
             return;
         }
 
         $nextSequence = $sequencePoints->getNextSequence();
-
         $requiredBenchMark = $sequencePoints->getRequiredBenchmark();
 
         if ($nextSequence && $requiredBenchMark) {
@@ -158,7 +206,6 @@ class FunnelProcessor
         }
 
         if ($requiredBenchMark) {
-            // if we have required benchmark then wait for that
             FunnelSubscriber::where('id', $funnelSubscriber->id)
                 ->update([
                     'next_sequence'       => $requiredBenchMark->sequence,
@@ -183,45 +230,48 @@ class FunnelProcessor
                     'status'              => 'active'
                 ]);
         }
-
-        foreach ($sequencePoints->getCurrentSequences() as $sequence) {
-            $this->processSequence($subscriber, $sequence, $funnelSubscriber->id);
-            if ($sequence->action_name == 'end_this_funnel') {
-                $this->completeFunnelSequence($funnelSubscriber);
-                return;
-            }
-        }
     }
 
-    /**
-     * @param $sequences
-     * @param $subscriber
-     * @param $funnelSubscriber
-     * @deprecated 1.2.0 Use processSequencePoints method
-     */
-    public function processSequences($sequences, $subscriber, $funnelSubscriber)
-    {
-        _deprecated_function(__METHOD__, '1.2.0', "(new FunnelProcessor)->processSequencePoints()");
-
-        $funnel = $this->getFunnel($funnelSubscriber->funnel_id);
-        $funnelPoints = new SequencePoints($funnel, $funnelSubscriber);
-        $this->processSequencePoints($funnelPoints, $subscriber, $funnelSubscriber);
-    }
 
     public function processSequence($subscriber, $sequence, $funnelSubscriberId)
     {
         $funnelMetric = $this->recordFunnelMetric($subscriber, $sequence);
+
+        // Mark complete BEFORE execution by design: prevents double-execution if the process
+        // crashes mid-action. The FunnelMetric + wasRecentlyCreated check ensures each action
+        // runs at most once per subscriber per sequence. Failed actions are not retried.
         FunnelHelper::changeFunnelSubSequenceStatus($funnelSubscriberId, $sequence->id, 'complete');
 
         if ($sequence->type == 'conditional' && $sequence->action_name != 'funnel_condition') {
             $sequence = FunnelHelper::migrateConditionSequence($sequence);
         }
 
-        // We want to run if the funnel Metrics is just created
-        // We are making sure that the action will run only once per subscriber per sequence
         if ($funnelMetric->wasRecentlyCreated) {
-            do_action('fluentcrm_funnel_sequence_handle_' . $sequence->action_name, $subscriber, $sequence, $funnelSubscriberId, $funnelMetric);
+            $handlerHook = 'fluentcrm_funnel_sequence_handle_' . $sequence->action_name;
+
+            if (!has_action($handlerHook)) {
+                // No runtime handler registered (Pro deactivated mid-flight, or a Pro-only
+                // step imported into a free install). Treat as an explicit "skip step and
+                // advance" with a log — a silent no-op here strands the subscriber.
+                Helper::debugLog(
+                    'Missing funnel sequence handler "' . $sequence->action_name . '" for funnel ' . $sequence->funnel_id,
+                    'Funnel Sub ID: ' . $funnelSubscriberId . ' — step skipped'
+                );
+                return;
+            }
+
+            try {
+                do_action($handlerHook, $subscriber, $sequence, $funnelSubscriberId, $funnelMetric, $this);
+            } catch (\Throwable $e) {
+                Helper::debugLog('Funnel sequence error for ' . $sequence->funnel_id . ' => Funnel Sub ID: ' . $funnelSubscriberId, $e->getMessage());
+            }
         }
+    }
+
+    public function resumeFunnelSubscriber($funnel, $subscriber, $funnelSubscriber)
+    {
+        $sequencePoints = new SequencePoints($funnel, $funnelSubscriber);
+        $this->processSequencePoints($sequencePoints, $subscriber, $funnelSubscriber);
     }
 
     public function completeFunnelSequence($funnelSubscriber)
@@ -231,9 +281,12 @@ class FunnelProcessor
                 'status' => 'completed'
             ]);
 
-        $this->setFunnel($funnelSubscriber->funnel_id);
+        $funnel = $this->getFunnel($funnelSubscriber->funnel_id);
+        $subscriber = $this->getSubscriber($funnelSubscriber->subscriber_id);
 
-        do_action('fluent_crm/automation_funnel_completed', $funnelSubscriber->funnel, $funnelSubscriber->subscriber);
+        if ($funnel && $subscriber) {
+            do_action('fluent_crm/automation_funnel_completed', $funnel, $subscriber);
+        }
     }
 
     public function followUpSequenceActions()
@@ -250,26 +303,51 @@ class FunnelProcessor
          * @return array Filtered subscriber statuses.
          * @since 1.0.0
          *
-         */
+        */
         $statuses = apply_filters('fluent_crm/funnel_subscriber_statuses', ['active']);
 
-        $jobs = FunnelSubscriber::whereIn('status', $statuses)
-            ->whereHas('funnel', function ($q) {
-                return $q->where('status', 'published');
+        /* Funnel processor batch limit
+         * This is the maximum number of funnel subscribers that will be processed in a single run.
+         * By default, it is set to 200. FluentCRM wants to process 200 funnel subscribers each time
+         * @param int $batchLimit The batch limit for the funnel processor.
+         * @return int Filtered batch limit.
+         * @since 3.0.0
+         */
+        $batchLimit = (int)apply_filters('fluent_crm/funnel_processor_batch_limit', 200);
+        if ($batchLimit < 1) {
+            $batchLimit = 1;
+        }
+
+        $jobs = FunnelSubscriber::join('fc_funnels', function ($join) {
+                $join->on('fc_funnel_subscribers.funnel_id', '=', 'fc_funnels.id')
+                    ->where('fc_funnels.status', '=', 'published')
+                    ->where('fc_funnels.type', '=', 'funnels');
             })
-            ->where('next_execution_time', '<=', current_time('mysql'))
-            ->whereNotNull('next_execution_time')
-            ->orderBy('next_execution_time', 'ASC')
-            ->limit(200)// we want to process 200 records each time
+            ->whereIn('fc_funnel_subscribers.status', $statuses)
+            ->where('fc_funnel_subscribers.next_execution_time', '<=', current_time('mysql'))
+            ->whereNotNull('fc_funnel_subscribers.next_execution_time')
+            ->orderBy('fc_funnel_subscribers.next_execution_time', 'ASC')
+            ->limit($batchLimit)
+            ->select('fc_funnel_subscribers.*')
             ->get();
 
         $startingAt = time();
 
         $completed = 0;
 
+        /* Funnel processor max processing seconds
+         * This is the maximum number of seconds that the funnel processor will run for.
+         * By default, it is set to 55 seconds.
+         * This is a safety mechanism to prevent the funnel processor from running for too long
+         * @since 3.0.0
+         */
+        $maxProcessingSeconds = (int)apply_filters('fluent_crm/funnel_processor_max_processing_seconds', 55);
+        if ($maxProcessingSeconds < 1) {
+            $maxProcessingSeconds = 1;
+        }
+
         foreach ($jobs as $job) {
-            if ((time() - $startingAt) > 55) {
-                // We are running this for 55 seconds. We have to stop now
+            if ((time() - $startingAt) > $maxProcessingSeconds) {
                 break;
             }
 
@@ -286,11 +364,21 @@ class FunnelProcessor
         $subscriber = $this->getSubscriber($funnelSubscriber->subscriber_id);
         $funnel = $this->getFunnel($funnelSubscriber->funnel_id);
 
-        if (!$subscriber) {
+        if (!$subscriber || !$funnel) {
             FunnelSubscriber::where('id', $funnelSubscriber->id)->update([
                 'status' => 'skipped'
             ]);
             return false;
+        }
+
+        if (!in_array($subscriber->status, ['subscribed', 'transactional'])) {
+            $forceRun = Arr::get($funnel->settings, '__force_run_actions') === 'yes';
+            if (!$forceRun) {
+                FunnelSubscriber::where('id', $funnelSubscriber->id)->update([
+                    'status' => 'cancelled'
+                ]);
+                return false;
+            }
         }
 
         $sequencePoints = new SequencePoints($funnel, $funnelSubscriber);
@@ -312,12 +400,12 @@ class FunnelProcessor
             if (Arr::get($startSequence->settings, 'can_enter') == 'no') {
                 return false;
             }
-
-            if ($funnelSubscriber->status == 'completed' || $funnelSubscriber->status == 'cancelled') {
-                return false; // It's already completed or cancelled. We don't need to start again
-            }
-
         }
+
+        if ($funnelSubscriber && ($funnelSubscriber->status == 'completed' || $funnelSubscriber->status == 'cancelled')) {
+            return false; // It's already completed or cancelled. We don't need to start again
+        }
+
 
         $this->recordFunnelMetric($subscriber, $startSequence, $metricArgs);
 
@@ -346,14 +434,19 @@ class FunnelProcessor
                 $data['status'] = FunnelHelper::getFunnelSubscriberStatus($data['status'], $this->getFunnel($startSequence->funnel_id), $subscriber);
             }
 
-            // let's create an empty sequence_subscriber
-            $funnelSubscriber = FunnelSubscriber::create($data);
+            // Unique index on (funnel_id, subscriber_id) prevents duplicates at DB level
+            try {
+                $funnelSubscriber = FunnelSubscriber::create($data);
+            } catch (\Exception $e) {
+                return;
+            }
         } else {
             // We already have funnel subscriber. Now we have to update that
             $lastSequence = $funnelSubscriber->last_sequence;
 
             if (!$lastSequence || ($lastSequence->sequence <= $startSequence->sequence)) {
                 $nextSequence = FunnelSequence::where('sequence', '>', $startSequence->sequence)
+                    ->where('funnel_id', $startSequence->funnel_id)
                     ->orderBy('sequence', 'ASC')
                     ->first();
 
@@ -396,28 +489,26 @@ class FunnelProcessor
 
     public function recordFunnelMetric($subscriber, $sequence, $metricArgs = [])
     {
-        $data = [
+        $lookupData = [
             'funnel_id'     => $sequence->funnel_id,
             'sequence_id'   => $sequence->id,
             'subscriber_id' => $subscriber->id
         ];
 
-        if ($metricArgs) {
-            $data = wp_parse_args($data, $metricArgs);
+        $extraData = $metricArgs ?: [];
+
+        try {
+            return FunnelMetric::firstOrCreate($lookupData, $extraData);
+        } catch (\Exception $e) {
+            // Race condition: another process inserted between the SELECT and INSERT
+            $existing = FunnelMetric::where($lookupData)->first();
+
+            if ($existing) {
+                return $existing;
+            }
+
+            throw $e;
         }
-
-        $exist = FunnelMetric::where('funnel_id', $sequence->funnel_id)
-            ->where('sequence_id', $sequence->id)
-            ->where('subscriber_id', $subscriber->id)
-            ->first();
-
-        if ($exist) {
-            $exist->fill($data);
-            $exist->save();
-            return $exist;
-        }
-
-        return FunnelMetric::create($data);
     }
 
     public function initChildSequences($parent, $isMatched, $subscriber, $funnelSubscriberId, $funnelMetric)
@@ -455,12 +546,16 @@ class FunnelProcessor
             foreach ($immediateSequences as $immediateSequence) {
                 $this->processSequence($subscriber, $immediateSequence, $funnelSubscriberId);
                 if ($immediateSequence->action_name == 'end_this_funnel') {
+                    $funnelSub = FunnelSubscriber::where('id', $funnelSubscriberId)->first();
+                    if ($funnelSub) {
+                        $this->completeFunnelSequence($funnelSub);
+                    }
                     $this->setFunnel($immediateSequence->funnel_id);
                     return;
                 }
 
                 if ($immediateSequence->action_name == 'fluentcrm_wait_times') {
-                    $waitTimes = FunnelHelper::getCurrentDelayInSeconds($immediateSequence->settings, $sequence, $funnelSubscriberId);
+                    $waitTimes = FunnelHelper::getCurrentDelayInSeconds($immediateSequence->settings, $immediateSequence, $funnelSubscriberId);
                 }
             }
 
@@ -488,6 +583,7 @@ class FunnelProcessor
         }
 
         $funnelSubscriber->last_sequence_id = $parent->id;
+        FunnelHelper::changeFunnelSubSequenceStatus($funnelSubscriberId, $parent->id);
         $funnel = $this->getFunnel($parent->funnel_id);
 
         // we don't have next sequence so we have to loop back to the parent
@@ -499,7 +595,7 @@ class FunnelProcessor
                 ->update([
                     'next_sequence'       => $nextSequence->sequence,
                     'next_sequence_id'    => $nextSequence->id,
-                    'next_execution_time' => gmdate('Y-m-d H:i:s', strtotime(current_time('mysql')) + $waitTimes),
+                    'next_execution_time' => gmdate('Y-m-d H:i:s', current_time('timestamp') + $waitTimes),
                     'status'              => 'active'
                 ]);
         }

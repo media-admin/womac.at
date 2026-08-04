@@ -63,7 +63,11 @@ class Cleanup
      */
     public function deleteCampaignAssets($campaignId)
     {
-        CampaignEmail::where('id', $campaignId)->delete();
+        // Idempotent backstop — Campaign::deleteCampaignData() already removes
+        // these in the normal delete flow, but we keep this here so any
+        // future caller that fires fluent_crm/campaign_deleted without
+        // running deleteCampaignData() first still gets a clean teardown.
+        CampaignEmail::where('campaign_id', $campaignId)->delete();
         CampaignUrlMetric::where('campaign_id', $campaignId)->delete();
     }
 
@@ -94,27 +98,43 @@ class Cleanup
      */
     public function handleUnsubscribe($subscriber)
     {
-        CampaignEmail::where('subscriber_id', $subscriber->id)
-            ->whereIn('status', ['pending', 'scheduled', 'draft', 'processing', 'scheduling'])
-            ->update([
-                'status' => 'cancelled'
-            ]);
-
-        FunnelSubscriber::where('subscriber_id', $subscriber->id)
-            ->where('status', 'active')
-            ->whereDoesntHave('funnel', function ($query) {
-                $query->where('trigger_name', 'fluent_crm/subscriber_status_changed');
-            })
-            ->update([
-                'status' => 'cancelled'
-            ]);
-        
-        if (defined('FLUENTCAMPAIGN')) {
-            \FluentCampaign\App\Models\SequenceTracker::where('subscriber_id', $subscriber->id)
-                ->where('status', 'active')
+        // Per-statement try/catch: a row-lock deadlock against the mailer
+        // workers on the CampaignEmail update should not also block the
+        // FunnelSubscriber / SequenceTracker cancellations. The next status
+        // transition (or a manual retry) will reconcile any rows we miss.
+        try {
+            CampaignEmail::where('subscriber_id', $subscriber->id)
+                ->whereIn('status', ['pending', 'scheduled', 'draft', 'processing', 'scheduling'])
                 ->update([
                     'status' => 'cancelled'
                 ]);
+        } catch (\Exception $e) {
+            Helper::debugLog('handleUnsubscribe', 'CampaignEmail cancel deferred: ' . $e->getMessage(), 'extended');
+        }
+
+        try {
+            FunnelSubscriber::where('subscriber_id', $subscriber->id)
+                ->where('status', 'active')
+                ->whereDoesntHave('funnel', function ($query) {
+                    $query->where('trigger_name', 'fluent_crm/subscriber_status_changed');
+                })
+                ->update([
+                    'status' => 'cancelled'
+                ]);
+        } catch (\Exception $e) {
+            Helper::debugLog('handleUnsubscribe', 'FunnelSubscriber cancel deferred: ' . $e->getMessage(), 'extended');
+        }
+
+        if (defined('FLUENTCAMPAIGN')) {
+            try {
+                \FluentCampaign\App\Models\SequenceTracker::where('subscriber_id', $subscriber->id)
+                    ->where('status', 'active')
+                    ->update([
+                        'status' => 'cancelled'
+                    ]);
+            } catch (\Exception $e) {
+                Helper::debugLog('handleUnsubscribe', 'SequenceTracker cancel deferred: ' . $e->getMessage(), 'extended');
+            }
         }
     }
 
@@ -130,6 +150,25 @@ class Cleanup
             ->update([
                 'email_address' => $subscriber->email
             ]);
+
+        // A new address has no bounce history — the accumulated soft-bounce strikes
+        // belong to the old mailbox and must not carry over toward the bounce flip.
+        $this->resetSoftBounceCount($subscriber);
+    }
+
+    /**
+     * Clear the accumulated soft-bounce strike counter.
+     *
+     * Wired to email changes and double-opt-in confirmations — both are positive
+     * deliverability/consent signals. Without a reset the counter accumulates
+     * across years until the Nth soft bounce silently flips the contact to
+     * `bounced`.
+     *
+     * @param \FluentCrm\App\Models\Subscriber $subscriber
+     */
+    public function resetSoftBounceCount($subscriber)
+    {
+        fluentcrm_delete_subscriber_meta($subscriber->id, '_soft_bounce_count');
     }
 
 
@@ -194,7 +233,7 @@ class Cleanup
 
         $data = [
             'group_id'    => 'fluent-crm-contact',
-            'group_label' => __('Fluent CRM Data', 'fluent-crm'),
+            'group_label' => __('FluentCRM Data', 'fluent-crm'),
             'item_id'     => 'crm-contact',
             'data'        => []
         ];
@@ -258,7 +297,7 @@ class Cleanup
 
         $hash = md5(wp_generate_uuid4() . '_' . $contact->id . '_' . '_' . time() . '__' . $contact->id);
         $exist->value = $hash;
-        $exist->updated_at = gmdate('Y-m-d H:i:s');
+        $exist->updated_at = current_time('mysql');
         $exist->save();
 
         return true;
@@ -273,7 +312,8 @@ class Cleanup
         // We will create email body and then cache it for future use
         $rawTemplates = [
             'raw_html',
-            'visual_builder'
+            'visual_builder',
+            'raw_classic'
         ];
 
         if (in_array($campaign->design_template, $rawTemplates)) {
@@ -293,7 +333,7 @@ class Cleanup
 
         global $wpdb;
 
-        // Get the timestamp for 7 days ago
+        // Get the timestamp for $days_old days ago
         $cutoff_date = gmdate('Y-m-d H:i:s', strtotime("-{$days_old} days"));
 
         // Get the group ID
@@ -306,23 +346,47 @@ class Cleanup
             return false; // Group not found
         }
 
-        // Delete old actions and their associated logs
-        $deleted = $wpdb->query($wpdb->prepare("
-        DELETE a, l
-        FROM {$wpdb->prefix}actionscheduler_actions a
-        LEFT JOIN {$wpdb->prefix}actionscheduler_logs l ON a.action_id = l.action_id
-        WHERE a.group_id = %d
-        AND a.status IN ('complete', 'failed')
-        AND a.scheduled_date_gmt < %s", $group_id, $cutoff_date));
+        // Delete old actions and their associated logs in bounded batches. FluentCRM
+        // produces a very large number of scheduled actions (email sends, funnels,
+        // sequences), so a single unbounded multi-table DELETE could hold a large lock
+        // and bloat the transaction on busy sites. We loop while batches stay full and
+        // we are still within a safe time budget.
+        $batchSize = 500;
+        $totalDeleted = 0;
 
-        // Clean up orphaned claims
+        do {
+            $actionIds = $wpdb->get_col($wpdb->prepare(
+                "SELECT action_id
+                 FROM {$wpdb->prefix}actionscheduler_actions
+                 WHERE group_id = %d
+                 AND status IN ('complete', 'failed')
+                 AND scheduled_date_gmt < %s
+                 LIMIT %d",
+                $group_id, $cutoff_date, $batchSize
+            ));
+
+            if (!$actionIds) {
+                break;
+            }
+
+            // Safe to interpolate: every id is cast to an integer.
+            $ids = implode(',', array_map('intval', $actionIds));
+
+            // Remove the associated logs first, then the actions themselves.
+            $wpdb->query("DELETE FROM {$wpdb->prefix}actionscheduler_logs WHERE action_id IN ({$ids})");
+            $totalDeleted += (int) $wpdb->query("DELETE FROM {$wpdb->prefix}actionscheduler_actions WHERE action_id IN ({$ids})");
+
+            $isFullBatch = count($actionIds) === $batchSize;
+        } while ($isFullBatch && !fluentCrmIsTimeOut(30));
+
+        // Clean up orphaned claims (claims whose actions no longer exist)
         $wpdb->query("
         DELETE c
         FROM {$wpdb->prefix}actionscheduler_claims c
         LEFT JOIN {$wpdb->prefix}actionscheduler_actions a ON c.claim_id = a.claim_id
         WHERE a.action_id IS NULL");
 
-        return $deleted;
+        return $totalDeleted;
     }
 
     public function SyncSubscriberDeleteSettings($fromKey, $value)
