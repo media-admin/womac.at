@@ -101,7 +101,7 @@ function fluentFormSanitizer($input, $attribute = null, $fields = [])
         }
     } elseif (is_array($input)) {
         $sanitizedInput = [];
-        
+
         foreach ($input as $key => &$value) {
             $key = fluentFormSanitizer($key);
             // Local var: mutating $attribute here would collapse every sibling
@@ -111,7 +111,7 @@ function fluentFormSanitizer($input, $attribute = null, $fields = [])
             $value = fluentFormSanitizer($value, $childAttribute, $fields);
             $sanitizedInput[$key] = $value;
         }
-        
+
         $input = $sanitizedInput;
     }
 
@@ -212,11 +212,11 @@ if (!function_exists('isWpAsyncRequest')) {
 function fluentFormIsHandlingSubmission()
 {
     $status = fluentFormWasSubmitted() || isWpAsyncRequest('fluentform_async_request');
-    
+
     $status = apply_filters_deprecated(
         'fluentform_is_handling_submission',
         [
-            $status
+            $status,
         ],
         FLUENTFORM_FRAMEWORK_UPGRADE,
         'fluentform/is_handling_submission',
@@ -323,22 +323,6 @@ function fluentform_options_sanitize($options)
     return \FluentForm\App\Helpers\Helper::sanitizeAdvancedOptions($options);
 }
 
-function fluentform_iframe_srcdoc_sanitize($value)
-{
-    $tags = wp_kses_allowed_html('post');
-    $tags['style'] = [
-        'types' => [],
-    ];
-    // Check if decoding is necessary
-    if (strpos($value, '&') !== false) {
-        // Decode HTML entities
-        $value = html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        $value = stripslashes($value);
-    }
-    return wp_kses($value, $tags);
-}
-
-
 function fluentform_sanitize_html($html)
 {
     if (!$html) {
@@ -360,9 +344,6 @@ function fluentform_sanitize_html($html)
         'width'           => [],
         'height'          => [],
         'src'             => [],
-        'srcdoc'          => [
-            'value_callback' => 'fluentform_iframe_srcdoc_sanitize'
-        ],
         'title'           => [],
         'frameborder'     => [],
         'allow'           => [],
@@ -371,7 +352,7 @@ function fluentform_sanitize_html($html)
         'allowfullscreen' => [],
         'style'           => [],
     ];
-    
+
     //svg
     if (empty($tags['svg'])) {
         $svg_args = [
@@ -388,7 +369,7 @@ function fluentform_sanitize_html($html)
                 'stroke'          => true,
                 'stroke-width'    => true,
                 'stroke-linecap'  => true,
-                'stroke-linejoin' => true
+                'stroke-linejoin' => true,
             ],
             'g'     => ['fill' => true],
             'title' => ['title' => true],
@@ -398,16 +379,16 @@ function fluentform_sanitize_html($html)
                 'transform' => true,
             ],
             'polyline' => [
-                'points' => true
-            ]
+                'points' => true,
+            ],
         ];
         $tags = array_merge($tags, $svg_args);
     }
-    
+
     $tags = apply_filters_deprecated(
         'fluentform_allowed_html_tags',
         [
-            $tags
+            $tags,
         ],
         FLUENTFORM_FRAMEWORK_UPGRADE,
         'fluentform/allowed_html_tags',
@@ -491,7 +472,7 @@ function fluentformSanitizeCSS($css)
     if (!is_string($css)) {
         $css = (string) $css;
     }
-    
+
     return preg_match('#</?\w+#', $css) ? '' : $css;
 }
 
